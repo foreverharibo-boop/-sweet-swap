@@ -38,8 +38,7 @@ let dataCache = null;
 let coreModulePromise = null;
 let sharedModulePromise = null;
 let cachedConnectionProfiles = [];
-let settingsPanelObserver = null;
-let settingsRepairTimer = null;
+let modalViewportGuardInstalled = false;
 
 function context() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
@@ -756,10 +755,82 @@ function renderModal() {
     const wrapper = document.createElement('div');
     wrapper.innerHTML = modalHtml();
     old.replaceWith(wrapper.firstElementChild);
+    scheduleModalPin();
+}
+
+function forceImportantStyle(element, property, value) {
+    element?.style?.setProperty(property, value, 'important');
+}
+
+function pinModalToViewport() {
+    const overlay = document.getElementById('sweet-swap-overlay');
+    const modal = overlay?.querySelector('.ss-modal');
+    if (!overlay || !modal) return;
+
+    const viewport = globalThis.visualViewport;
+    const width = Math.max(1, Math.round(viewport?.width || globalThis.innerWidth || document.documentElement.clientWidth || 360));
+    const height = Math.max(1, Math.round(viewport?.height || globalThis.innerHeight || document.documentElement.clientHeight || 640));
+    const left = Math.round(viewport?.offsetLeft || 0);
+    const top = Math.round(viewport?.offsetTop || 0);
+    const gutter = width <= 700 ? 8 : 20;
+    const modalWidth = Math.max(1, Math.min(1040, width - gutter * 2));
+    const modalHeight = Math.max(1, height - gutter * 2);
+
+    if (document.documentElement && overlay.parentElement !== document.documentElement) {
+        document.documentElement.appendChild(overlay);
+    }
+    overlay.hidden = false;
+    forceImportantStyle(overlay, 'position', 'fixed');
+    forceImportantStyle(overlay, 'inset', 'auto');
+    forceImportantStyle(overlay, 'left', `${left}px`);
+    forceImportantStyle(overlay, 'top', `${top}px`);
+    forceImportantStyle(overlay, 'width', `${width}px`);
+    forceImportantStyle(overlay, 'height', `${height}px`);
+    forceImportantStyle(overlay, 'z-index', '2147483647');
+    forceImportantStyle(overlay, 'display', 'flex');
+    forceImportantStyle(overlay, 'align-items', 'center');
+    forceImportantStyle(overlay, 'justify-content', 'center');
+    forceImportantStyle(overlay, 'padding', `${gutter}px`);
+    forceImportantStyle(overlay, 'margin', '0');
+    forceImportantStyle(overlay, 'transform', 'none');
+    forceImportantStyle(overlay, 'visibility', 'visible');
+    forceImportantStyle(overlay, 'opacity', '1');
+
+    forceImportantStyle(modal, 'position', 'relative');
+    forceImportantStyle(modal, 'inset', 'auto');
+    forceImportantStyle(modal, 'width', `${modalWidth}px`);
+    forceImportantStyle(modal, 'height', 'auto');
+    forceImportantStyle(modal, 'max-width', `${modalWidth}px`);
+    forceImportantStyle(modal, 'max-height', `${modalHeight}px`);
+    forceImportantStyle(modal, 'margin', 'auto');
+    forceImportantStyle(modal, 'transform', 'none');
+    forceImportantStyle(modal, 'visibility', 'visible');
+    forceImportantStyle(modal, 'opacity', '1');
+    if (width <= 700) forceImportantStyle(modal, 'border-radius', '18px');
+}
+
+function scheduleModalPin() {
+    pinModalToViewport();
+    if (typeof globalThis.requestAnimationFrame === 'function') {
+        globalThis.requestAnimationFrame(() => pinModalToViewport());
+    }
+    setTimeout(() => pinModalToViewport(), 120);
+}
+
+function installModalViewportGuard() {
+    if (modalViewportGuardInstalled) return;
+    modalViewportGuardInstalled = true;
+    globalThis.addEventListener?.('resize', scheduleModalPin, { passive: true });
+    globalThis.addEventListener?.('orientationchange', scheduleModalPin, { passive: true });
+    globalThis.visualViewport?.addEventListener?.('resize', scheduleModalPin, { passive: true });
+    globalThis.visualViewport?.addEventListener?.('scroll', scheduleModalPin, { passive: true });
 }
 
 async function openModal(tab = 'swap') {
-    if (document.getElementById('sweet-swap-overlay')) return;
+    if (document.getElementById('sweet-swap-overlay')) {
+        scheduleModalPin();
+        return;
+    }
     if (!settings().enabled) {
         toast('warning', '확장 설정에서 sweet swap을 먼저 켜줘.');
         return;
@@ -770,8 +841,11 @@ async function openModal(tab = 'swap') {
     }
     await loadScopeState();
     state.tab = settings().ageConfirmed ? tab : 'settings';
-    document.body.insertAdjacentHTML('beforeend', modalHtml());
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = modalHtml();
+    document.documentElement.appendChild(wrapper.firstElementChild);
     document.documentElement.classList.add('ss-modal-open');
+    scheduleModalPin();
 }
 
 function closeModal() {
@@ -845,7 +919,6 @@ function installGlobalHandlers() {
     document.addEventListener('click', event => {
         if (event.target.closest('#sweet-swap-overlay')) handleClick(event);
         if (event.target.closest('#sweet-swap-launcher')) openModal('swap');
-        scheduleSettingsPanelRepair(60);
     });
     document.addEventListener('change', event => {
         if (event.target.id === 'sweet-swap-profile') return handleProfileChange(event);
@@ -885,75 +958,13 @@ async function refreshProfileDropdown() {
     select.value = selectedExists ? selectedId : '';
 }
 
-function settingsHosts() {
-    return ['extensions_settings2', 'extensions_settings']
-        .map(id => document.getElementById(id))
-        .filter((host, index, list) => host && list.indexOf(host) === index);
-}
-
-function isVisibleSettingsHost(host) {
-    if (!host) return false;
-    if (host.isConnected === false) return false;
-    if (typeof host.getClientRects === 'function' && host.getClientRects().length > 0) return true;
-    if (typeof globalThis.getComputedStyle !== 'function') return false;
-    const style = globalThis.getComputedStyle(host);
-    return style.display !== 'none' && style.visibility !== 'hidden' && host.offsetParent !== null;
-}
-
-function preferredSettingsHost(panel = null) {
-    const hosts = settingsHosts();
-    const visible = hosts.find(isVisibleSettingsHost);
-    if (visible) return visible;
-    if (panel?.parentElement && hosts.includes(panel.parentElement)) return panel.parentElement;
-    return hosts[0] || null;
-}
-
-function middleReference(host, panel) {
-    const siblings = Array.from(host?.children || []).filter(element => element !== panel);
-    return siblings.length ? siblings[Math.floor(siblings.length / 2)] : null;
-}
-
 function ensureSettingsPanel() {
-    let panel = document.getElementById('sweet-swap-settings');
-    const host = preferredSettingsHost(panel);
-    if (!host) return;
-
-    let changed = false;
-    if (!panel) {
+    if (document.getElementById('sweet-swap-settings')) return;
+    const host = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
+    if (host) {
         host.insertAdjacentHTML('beforeend', settingsPanelHtml());
-        panel = document.getElementById('sweet-swap-settings');
-        changed = true;
+        refreshProfileDropdown();
     }
-    if (!panel) return;
-
-    panel.hidden = false;
-    panel.classList?.remove('hidden');
-    const before = middleReference(host, panel);
-    if (panel.parentElement !== host || panel.nextElementSibling !== before) {
-        host.insertBefore(panel, before);
-        changed = true;
-    }
-    if (changed) refreshProfileDropdown();
-}
-
-function scheduleSettingsPanelRepair(delay = 0) {
-    if (settingsRepairTimer !== null) clearTimeout(settingsRepairTimer);
-    settingsRepairTimer = setTimeout(() => {
-        settingsRepairTimer = null;
-        ensureSettingsPanel();
-    }, delay);
-}
-
-function installSettingsPanelGuard() {
-    if (settingsPanelObserver || typeof MutationObserver !== 'function' || !document.body) return;
-    settingsPanelObserver = new MutationObserver(mutations => {
-        const panel = document.getElementById('sweet-swap-settings');
-        if (!panel?.isConnected) return scheduleSettingsPanelRepair();
-        if (mutations.some(mutation => mutation.target === panel.parentElement)) scheduleSettingsPanelRepair();
-    });
-    settingsPanelObserver.observe(document.body, { childList: true, subtree: true });
-    globalThis.addEventListener?.('resize', () => scheduleSettingsPanelRepair(80), { passive: true });
-    globalThis.addEventListener?.('orientationchange', () => scheduleSettingsPanelRepair(80), { passive: true });
 }
 
 function ensureLauncher() {
@@ -1003,14 +1014,13 @@ async function initialize() {
     await loadData();
     installGlobalHandlers();
     installGenerationCleanup();
-    installSettingsPanelGuard();
+    installModalViewportGuard();
     ensureSettingsPanel();
     ensureLauncher();
     setTimeout(() => {
         ensureSettingsPanel();
         refreshProfileDropdown();
     }, 1200);
-    setTimeout(() => scheduleSettingsPanelRepair(), 3500);
     setTimeout(ensureLauncher, 1200);
     setTimeout(ensureLauncher, 3500);
     console.log(`${LOG_PREFIX} loaded`);
