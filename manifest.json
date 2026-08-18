@@ -1,0 +1,13 @@
+{
+  "display_name": "💝sweet swap",
+  "loading_order": 21,
+  "requires": [],
+  "optional": [],
+  "dependencies": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "담은 & Codex",
+  "version": "1.0.0",
+  "auto_update": false,
+  "minimum_client_version": "1.18.0"
+}
