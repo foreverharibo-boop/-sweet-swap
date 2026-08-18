@@ -18,7 +18,7 @@ SillyTavern 1.18+용 익명 판타지 카드 교환 확장입니다. 사용자�
    - 사용자 확장: `SillyTavern/data/default-user/extensions/`
 2. SillyTavern을 다시 시작합니다.
 3. SillyTavern의 Connection Manager에서 카드 생성에 쓸 연결 프로필을 만듭니다.
-4. 확장 설정의 `💝 sweet swap`에서 `전용 연결` 프로필을 선택합니다.
+4. 확장 설정의 `💝 sweet swap`을 펼치고 `전용 연결` 프로필을 선택합니다.
 5. 확장 메뉴의 `💝sweet swap`을 눌러 교환함을 엽니다.
 6. 최초 한 번, 설정에서 모든 등장인물이 성인임을 확인합니다.
 

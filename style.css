@@ -610,29 +610,21 @@
     to { transform: rotate(360deg); }
 }
 
-.sweet-swap-settings {
-    padding: 10px 0 !important;
-}
-
-.ss-extension-line {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 12px;
-}
-
 .ss-extension-name {
     display: flex;
     align-items: center;
     gap: .25em;
 }
 
+.sweet-swap-settings .inline-drawer-content {
+    padding-top: 8px;
+    padding-bottom: 8px;
+}
+
 .ss-profile-field {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
-    justify-content: flex-end;
-    flex: 1 1 280px;
     gap: 8px;
     min-width: 0;
 }
@@ -645,7 +637,7 @@
 }
 
 .ss-profile-field select {
-    width: min(300px, 100%);
+    width: 100%;
     min-width: 0;
     min-height: 34px;
     padding: 5px 9px;
@@ -657,9 +649,9 @@
     font-size: 12px;
 }
 
-.sweet-swap-settings > small {
+.ss-profile-help {
     display: block;
-    margin-top: 4px;
+    margin-top: 8px;
     opacity: .68;
 }
 
@@ -760,15 +752,6 @@
         width: 42%;
     }
 
-    .ss-profile-field {
-        flex-basis: 100%;
-        justify-content: stretch;
-    }
-
-    .ss-profile-field select {
-        flex: 1;
-        width: 100%;
-    }
 }
 
 @media (prefers-reduced-motion: reduce) {

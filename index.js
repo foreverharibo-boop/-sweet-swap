@@ -855,11 +855,16 @@ function installGlobalHandlers() {
 
 function settingsPanelHtml() {
     return `<div id="sweet-swap-settings" class="sweet-swap-settings extension_container">
-        <div class="ss-extension-line">
-            <div class="ss-extension-name"><span>💝</span><b>sweet swap</b></div>
-            <label class="ss-profile-field"><span>전용 연결</span><select id="sweet-swap-profile" aria-label="sweet swap 전용 연결 프로필" disabled><option value="">연결 프로필 불러오는 중…</option></select></label>
+        <div class="inline-drawer">
+            <div class="inline-drawer-toggle inline-drawer-header">
+                <div class="ss-extension-name"><span>💝</span><b>sweet swap</b></div>
+                <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+            </div>
+            <div class="inline-drawer-content">
+                <label class="ss-profile-field"><span>전용 연결</span><select id="sweet-swap-profile" aria-label="sweet swap 전용 연결 프로필" disabled><option value="">연결 프로필 불러오는 중…</option></select></label>
+                <small class="ss-profile-help">카드 생성과 두 장 섞기만 선택한 프로필로 처리해요. 메인 연결은 바뀌지 않아요.</small>
+            </div>
         </div>
-        <small>카드 생성과 두 장 섞기만 선택한 프로필로 처리해요. 메인 연결은 바뀌지 않아요.</small>
     </div>`;
 }
 
