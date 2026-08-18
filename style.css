@@ -618,6 +618,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: 12px;
 }
 
@@ -625,6 +626,35 @@
     display: flex;
     align-items: center;
     gap: .25em;
+}
+
+.ss-profile-field {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex: 1 1 280px;
+    gap: 8px;
+    min-width: 0;
+}
+
+.ss-profile-field > span {
+    flex: 0 0 auto;
+    opacity: .72;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.ss-profile-field select {
+    width: min(300px, 100%);
+    min-width: 0;
+    min-height: 34px;
+    padding: 5px 9px;
+    border: 1px solid var(--SmartThemeBorderColor, currentColor);
+    border-radius: 8px;
+    color: var(--SmartThemeBodyColor, inherit);
+    background: var(--black30a, rgba(0, 0, 0, .08));
+    font: inherit;
+    font-size: 12px;
 }
 
 .sweet-swap-settings > small {
@@ -729,10 +759,19 @@
     .ss-setting-field select {
         width: 42%;
     }
+
+    .ss-profile-field {
+        flex-basis: 100%;
+        justify-content: stretch;
+    }
+
+    .ss-profile-field select {
+        flex: 1;
+        width: 100%;
+    }
 }
 
 @media (prefers-reduced-motion: reduce) {
     .ss-spinner { animation-duration: 1.5s; }
     .ss-switch-row i::after { transition: none; }
 }
-

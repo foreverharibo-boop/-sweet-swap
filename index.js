@@ -9,6 +9,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     defaultMode: 'blind',
     autoBurnAfterStart: false,
     keepSaved: 50,
+    connectionProfileId: '',
 });
 
 const MODE_LABELS = Object.freeze({
@@ -35,6 +36,8 @@ const state = {
 
 let dataCache = null;
 let coreModulePromise = null;
+let sharedModulePromise = null;
+let cachedConnectionProfiles = [];
 
 function context() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
@@ -236,13 +239,113 @@ function safeJson(text) {
     }
 }
 
-async function quietGenerate(prompt) {
-    const ctx = context();
-    if (typeof ctx?.generateQuietPrompt !== 'function') {
-        throw new Error('현재 SillyTavern에서 백그라운드 생성 기능을 찾지 못했어요.');
+async function loadConnectionService() {
+    const fromContext = context()?.ConnectionManagerRequestService;
+    if (fromContext) return fromContext;
+
+    sharedModulePromise ??= import('/scripts/extensions/shared.js').catch(error => {
+        console.warn(`${LOG_PREFIX} shared module import failed`, error);
+        return {};
+    });
+    const shared = await sharedModulePromise;
+    return shared?.ConnectionManagerRequestService ?? null;
+}
+
+function profileLabel(profile) {
+    const detail = [profile?.api, profile?.model].filter(Boolean).join(' · ');
+    return profile?.name || detail || '이름 없는 연결 프로필';
+}
+
+async function getSupportedConnectionProfiles() {
+    const service = await loadConnectionService();
+    if (!service || typeof service.getSupportedProfiles !== 'function') return [];
+    try {
+        cachedConnectionProfiles = service.getSupportedProfiles() || [];
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} connection profiles unavailable`, error);
+        cachedConnectionProfiles = [];
     }
-    const output = await ctx.generateQuietPrompt({ quietPrompt: prompt });
-    return typeof output === 'string' ? output : output?.text ?? output?.content ?? String(output ?? '');
+    return cachedConnectionProfiles;
+}
+
+async function selectedConnection() {
+    const profileId = settings().connectionProfileId;
+    if (!profileId) throw new Error('확장 설정에서 sweet swap 전용 연결 프로필을 먼저 선택해줘.');
+
+    const service = await loadConnectionService();
+    if (!service || typeof service.sendRequest !== 'function') {
+        throw new Error('SillyTavern 연결 프로필 요청 기능을 찾지 못했어요.');
+    }
+
+    const profiles = await getSupportedConnectionProfiles();
+    const profile = profiles.find(item => String(item.id) === String(profileId));
+    if (!profile) throw new Error('선택한 연결 프로필을 사용할 수 없어요. 확장 설정에서 다시 골라줘.');
+    return { service, profile };
+}
+
+function clipText(value, maxLength) {
+    const text = String(value ?? '').trim();
+    if (text.length <= maxLength) return text;
+    return `${text.slice(0, maxLength)}\n[truncated]`;
+}
+
+function currentRoleplayContext() {
+    const ctx = context();
+    if (!ctx) return 'No roleplay context is available.';
+
+    const character = ctx.characters?.[ctx.characterId];
+    const characterData = character?.data || character || {};
+    const profile = [
+        character?.name && `Name: ${character.name}`,
+        characterData.description && `Description: ${clipText(characterData.description, 4500)}`,
+        characterData.personality && `Personality: ${clipText(characterData.personality, 3000)}`,
+        characterData.scenario && `Scenario: ${clipText(characterData.scenario, 3000)}`,
+    ].filter(Boolean);
+
+    if (ctx.groupId) {
+        const group = (ctx.groups ?? []).find(item => String(item.id) === String(ctx.groupId));
+        const memberKeys = group?.members || [];
+        const members = memberKeys.map(key => {
+            const match = (ctx.characters ?? []).find(item => item.avatar === key || String(item.id) === String(key));
+            return match?.name || key;
+        }).filter(Boolean);
+        profile.unshift(`Group: ${group?.name || currentScope().name}${members.length ? `\nMembers: ${members.join(', ')}` : ''}`);
+    }
+
+    const recentChat = (ctx.chat || []).slice(-20).map(message => {
+        const content = clipText(message?.mes ?? message?.text ?? message?.content, 1800);
+        if (!content) return '';
+        const speaker = message?.is_user
+            ? (ctx.name1 || 'User')
+            : (message?.name || character?.name || ctx.name2 || 'Character');
+        return `${speaker}: ${content}`;
+    }).filter(Boolean).join('\n\n');
+
+    return [
+        profile.length ? `CHARACTER / GROUP\n${profile.join('\n\n')}` : '',
+        recentChat ? `RECENT CHAT (oldest to newest)\n${recentChat}` : 'RECENT CHAT\nNo messages yet.',
+    ].filter(Boolean).join('\n\n');
+}
+
+async function backgroundGenerate(prompt) {
+    const { service, profile } = await selectedConnection();
+    const messages = [
+        {
+            role: 'system',
+            content: 'You create a compact roleplay scenario card. Follow the supplied fictional context and boundaries. Return only valid JSON with the requested fields.',
+        },
+        { role: 'user', content: prompt },
+    ];
+    const output = await service.sendRequest(profile.id, messages, 1000, {
+        stream: false,
+        signal: null,
+        extractData: true,
+        includePreset: true,
+        includeInstruct: true,
+    });
+    const content = typeof output === 'string' ? output : output?.content ?? output?.text;
+    if (!content) throw new Error('전용 연결 프로필에서 빈 응답이 돌아왔어요.');
+    return typeof content === 'string' ? content : JSON.stringify(content);
 }
 
 function characterCardPrompt(userCard) {
@@ -255,6 +358,9 @@ This is an anonymous exchange. You must create the character's card independentl
 
 KNOWN USER BOUNDARIES ONLY
 ${userCard?.fields?.exclude || 'No additional boundary was entered.'}
+
+CURRENT ROLEPLAY CONTEXT
+${currentRoleplayContext()}
 
 Return JSON only, with exactly these string fields:
 {
@@ -309,7 +415,7 @@ async function generateCharacterCard() {
     state.userCard = candidate;
     setBusy(true, '상대의 봉인 카드를 작성하는 중…');
     try {
-        const result = safeJson(await quietGenerate(characterCardPrompt(candidate)));
+        const result = safeJson(await backgroundGenerate(characterCardPrompt(candidate)));
         state.characterCard = makeCard('character', result);
         state.exchange = null;
         await persistDraft();
@@ -340,7 +446,7 @@ async function exchangeCards() {
         let combinedCard = null;
         let chosen = null;
         if (state.mode === 'blend') {
-            combinedCard = makeCard('result', safeJson(await quietGenerate(blendPrompt(state.userCard, state.characterCard))));
+            combinedCard = makeCard('result', safeJson(await backgroundGenerate(blendPrompt(state.userCard, state.characterCard))));
         } else if (state.mode === 'draw') {
             chosen = Math.random() < 0.5 ? 'user' : 'character';
         }
@@ -611,13 +717,15 @@ function savedTabHtml() {
 
 function settingsTabHtml() {
     const s = settings();
+    const profile = cachedConnectionProfiles.find(item => String(item.id) === String(s.connectionProfileId));
+    const profileName = profile ? profileLabel(profile) : '미선택';
     return `<section class="ss-settings-list">
         <label class="ss-switch-row"><div><b>sweet swap 사용</b><small>확장의 생성과 주입 기능을 켜요.</small></div><input id="ss-enabled" type="checkbox" ${s.enabled ? 'checked' : ''}><i></i></label>
         <label class="ss-switch-row ss-age-row"><div><b>등장인물은 모두 성인입니다</b><small>성인 캐릭터 간의 합의된 역할극에만 사용해요.</small></div><input id="ss-age" type="checkbox" ${s.ageConfirmed ? 'checked' : ''}><i></i></label>
         <label class="ss-setting-field"><div><b>기본 교환 방식</b><small>새 캐릭터에서 처음 선택되는 방식이에요.</small></div><select id="ss-default-mode">${Object.entries(MODE_LABELS).map(([value, label]) => `<option value="${value}" ${s.defaultMode === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
         <label class="ss-switch-row"><div><b>장면 시작 후 자동으로 카드 태우기</b><small>비밀 서랍에 보관한 기록은 삭제하지 않아요.</small></div><input id="ss-auto-burn" type="checkbox" ${s.autoBurnAfterStart ? 'checked' : ''}><i></i></label>
         <label class="ss-setting-field"><div><b>캐릭터별 보관 개수</b><small>오래된 기록부터 자동 정리돼요.</small></div><input id="ss-keep" type="number" min="1" max="200" value="${escapeHtml(s.keepSaved)}"></label>
-        <div class="ss-info-box">캐릭터 카드 생성에는 현재 SillyTavern 연결을 사용해요. 장면 지시는 다음 본채팅 생성에 한 번만 적용되고 자동으로 제거돼요.</div>
+        <div class="ss-info-box">카드 생성·두 장 섞기: <b>${escapeHtml(profileName)}</b> 전용 연결 프로필 사용<br>장면 시작: SillyTavern 메인 연결 사용<br><br>전용 프로필은 확장 설정 패널에서 선택해요. 백그라운드 요청 중에도 메인 연결은 바뀌지 않아요.</div>
     </section>`;
 }
 
@@ -724,12 +832,20 @@ function handleChange(event) {
     toast('success', '설정을 저장했어.');
 }
 
+async function handleProfileChange(event) {
+    settings().connectionProfileId = event.target.value || '';
+    saveSettings();
+    await refreshProfileDropdown();
+    if (settings().connectionProfileId) toast('success', 'sweet swap 전용 연결 프로필을 저장했어.');
+}
+
 function installGlobalHandlers() {
     document.addEventListener('click', event => {
         if (event.target.closest('#sweet-swap-overlay')) handleClick(event);
-        if (event.target.closest('#sweet-swap-launcher, #sweet-swap-open')) openModal('swap');
+        if (event.target.closest('#sweet-swap-launcher')) openModal('swap');
     });
     document.addEventListener('change', event => {
+        if (event.target.id === 'sweet-swap-profile') return handleProfileChange(event);
         if (event.target.closest('#sweet-swap-overlay')) handleChange(event);
     });
     document.addEventListener('keydown', event => {
@@ -741,16 +857,33 @@ function settingsPanelHtml() {
     return `<div id="sweet-swap-settings" class="sweet-swap-settings extension_container">
         <div class="ss-extension-line">
             <div class="ss-extension-name"><span>💝</span><b>sweet swap</b></div>
-            <button id="sweet-swap-open" class="menu_button">교환함 열기</button>
+            <label class="ss-profile-field"><span>전용 연결</span><select id="sweet-swap-profile" aria-label="sweet swap 전용 연결 프로필" disabled><option value="">연결 프로필 불러오는 중…</option></select></label>
         </div>
-        <small>나와 캐릭터가 봉인된 판타지 카드를 익명으로 교환해요.</small>
+        <small>카드 생성과 두 장 섞기만 선택한 프로필로 처리해요. 메인 연결은 바뀌지 않아요.</small>
     </div>`;
+}
+
+async function refreshProfileDropdown() {
+    const select = document.getElementById('sweet-swap-profile');
+    if (!select) return;
+    const selectedId = settings().connectionProfileId || '';
+    const profiles = await getSupportedConnectionProfiles();
+    const selectedExists = profiles.some(profile => String(profile.id) === String(selectedId));
+    const firstOption = profiles.length
+        ? '<option value="">연결 프로필 선택…</option>'
+        : '<option value="">사용 가능한 연결 프로필 없음</option>';
+    select.innerHTML = firstOption + profiles.map(profile => `<option value="${escapeHtml(profile.id)}" ${String(profile.id) === String(selectedId) ? 'selected' : ''}>${escapeHtml(profileLabel(profile))}</option>`).join('');
+    select.disabled = profiles.length === 0;
+    select.value = selectedExists ? selectedId : '';
 }
 
 function ensureSettingsPanel() {
     if (document.getElementById('sweet-swap-settings')) return;
     const host = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
-    if (host) host.insertAdjacentHTML('beforeend', settingsPanelHtml());
+    if (host) {
+        host.insertAdjacentHTML('beforeend', settingsPanelHtml());
+        refreshProfileDropdown();
+    }
 }
 
 function ensureLauncher() {
@@ -802,7 +935,10 @@ async function initialize() {
     installGenerationCleanup();
     ensureSettingsPanel();
     ensureLauncher();
-    setTimeout(ensureSettingsPanel, 1200);
+    setTimeout(() => {
+        ensureSettingsPanel();
+        refreshProfileDropdown();
+    }, 1200);
     setTimeout(ensureLauncher, 1200);
     setTimeout(ensureLauncher, 3500);
     console.log(`${LOG_PREFIX} loaded`);
