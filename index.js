@@ -29,6 +29,7 @@ const state = {
     characterCard: null,
     exchange: null,
     selectedSavedId: null,
+    scopeKey: null,
     promptArmed: false,
     promptConsumed: false,
     promptScopeKey: null,
@@ -39,6 +40,10 @@ let coreModulePromise = null;
 let sharedModulePromise = null;
 let cachedConnectionProfiles = [];
 let modalViewportGuardInstalled = false;
+let draftSaveTimer = null;
+let activeAbortController = null;
+
+const DRAFT_FIELD_IDS = ['ss-title', 'ss-situation', 'ss-location', 'ss-mood', 'ss-role', 'ss-must', 'ss-exclude', 'ss-note'];
 
 function context() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
@@ -157,12 +162,13 @@ async function loadScopeState() {
     state.exchange = draft?.exchange || null;
     state.mode = draft?.mode || settings().defaultMode;
     state.selectedSavedId = null;
+    state.scopeKey = scope.key;
 }
 
 async function persistDraft() {
-    const scope = currentScope();
+    const scopeKey = state.scopeKey || currentScope().key;
     const data = await loadData();
-    data.drafts[scope.key] = {
+    data.drafts[scopeKey] = {
         userCard: state.userCard,
         characterCard: state.characterCard,
         exchange: state.exchange,
@@ -170,6 +176,28 @@ async function persistDraft() {
         updatedAt: nowIso(),
     };
     await saveData();
+}
+
+function captureUserFormIfVisible() {
+    if (state.tab !== 'swap') return;
+    if (!document.getElementById('ss-title')) return;
+    const candidate = readUserForm();
+    if (cardHasContent(candidate)) state.userCard = candidate;
+}
+
+function scheduleDraftSave() {
+    clearTimeout(draftSaveTimer);
+    draftSaveTimer = setTimeout(() => {
+        captureUserFormIfVisible();
+        persistDraft();
+    }, 600);
+}
+
+function flushDraftSave() {
+    clearTimeout(draftSaveTimer);
+    draftSaveTimer = null;
+    captureUserFormIfVisible();
+    persistDraft();
 }
 
 function normalizeFields(raw = {}) {
@@ -328,6 +356,12 @@ function currentRoleplayContext() {
     ].filter(Boolean).join('\n\n');
 }
 
+function cancelBackgroundGenerate() {
+    if (!activeAbortController) return;
+    activeAbortController.abort();
+    activeAbortController = null;
+}
+
 async function backgroundGenerate(prompt) {
     const { service, profile } = await selectedConnection();
     const messages = [
@@ -337,20 +371,48 @@ async function backgroundGenerate(prompt) {
         },
         { role: 'user', content: prompt },
     ];
-    const output = await service.sendRequest(profile.id, messages, 1000, {
-        stream: false,
-        signal: null,
-        extractData: true,
-        includePreset: true,
-        includeInstruct: true,
-    });
-    const content = typeof output === 'string' ? output : output?.content ?? output?.text;
-    if (!content) throw new Error('전용 연결 프로필에서 빈 응답이 돌아왔어요.');
-    return typeof content === 'string' ? content : JSON.stringify(content);
+    const controller = new AbortController();
+    activeAbortController = controller;
+    try {
+        const output = await service.sendRequest(profile.id, messages, 1000, {
+            stream: false,
+            signal: controller.signal,
+            extractData: true,
+            includePreset: true,
+            includeInstruct: true,
+        });
+        const content = typeof output === 'string' ? output : output?.content ?? output?.text;
+        if (!content) throw new Error('전용 연결 프로필에서 빈 응답이 돌아왔어요.');
+        return typeof content === 'string' ? content : JSON.stringify(content);
+    } finally {
+        if (activeAbortController === controller) activeAbortController = null;
+    }
+}
+
+function recentSavedExchanges(limit = 2) {
+    const list = dataCache?.saved?.[currentScope().key] || [];
+    return list.slice(0, limit);
+}
+
+function exchangeRecapLine(exchange) {
+    const pick = card => clipText(card?.fields?.situation || card?.fields?.title || '', 160);
+    if (exchange.mode === 'blend') return pick(exchange.combinedCard);
+    if (exchange.mode === 'draw') return pick(exchange.chosen === 'character' ? exchange.characterCard : exchange.userCard);
+    const a = pick(exchange.userCard);
+    const b = pick(exchange.characterCard);
+    return [a, b].filter(Boolean).join(' / ');
+}
+
+function pastExchangesBlock() {
+    const lines = recentSavedExchanges(2).map(exchangeRecapLine).filter(Boolean);
+    if (!lines.length) return '';
+    return `PAST SAVED EXCHANGES WITH THIS CHARACTER (most recent first — private history only the two of you know about; let it inform continuity where it naturally fits, don't just restate it)
+${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}`;
 }
 
 function characterCardPrompt(userCard) {
     const scope = currentScope();
+    const pastBlock = pastExchangesBlock();
     return `You are creating one private, sealed fantasy-exchange card for ${scope.name} in the current fictional roleplay.
 
 All participants in this feature must be fictional adults. Respect mutual consent and the known user boundaries below. Infer the character's private wish from their established personality, relationship, and recent chat history. Keep the character recognizably in-character; do not flatten them into a generic voice. The card may be intimate and mature when appropriate, but it must remain a compact scenario card rather than a completed scene.
@@ -362,7 +424,7 @@ ${userCard?.fields?.exclude || 'No additional boundary was entered.'}
 
 CURRENT ROLEPLAY CONTEXT
 ${currentRoleplayContext()}
-
+${pastBlock ? `\n${pastBlock}\n` : ''}
 Return JSON only, with exactly these string fields:
 {
   "title": "short evocative title",
@@ -377,6 +439,7 @@ Return JSON only, with exactly these string fields:
 }
 
 function blendPrompt(userCard, characterCard) {
+    const pastBlock = pastExchangesBlock();
     return `Combine two sealed fantasy cards into one coherent private scenario card for the current fictional adult roleplay.
 
 Preserve the most distinctive wish from each card. Mutual consent and all exclusions are mandatory; if the cards conflict, choose the safer compatible interpretation. Do not write the scene itself. Do not mention cards, prompts, rules, or an AI.
@@ -386,7 +449,7 @@ ${cardToPrompt(userCard)}
 
 CHARACTER CARD
 ${cardToPrompt(characterCard)}
-
+${pastBlock ? `\n${pastBlock}\n` : ''}
 Return JSON only, with exactly these string fields:
 {
   "title": "short combined title",
@@ -422,8 +485,12 @@ async function generateCharacterCard() {
         await persistDraft();
         toast('success', `${currentScope().name}의 카드가 도착했어.`);
     } catch (error) {
-        console.error(LOG_PREFIX, error);
-        toast('error', error?.message || '캐릭터 카드를 만들지 못했어요.');
+        if (error?.name === 'AbortError') {
+            toast('info', '카드 생성을 취소했어.');
+        } else {
+            console.error(LOG_PREFIX, error);
+            toast('error', error?.message || '캐릭터 카드를 만들지 못했어요.');
+        }
     } finally {
         setBusy(false);
         renderModal();
@@ -464,8 +531,12 @@ async function exchangeCards() {
         await persistDraft();
         toast('success', `${MODE_LABELS[state.mode]} 교환이 끝났어.`);
     } catch (error) {
-        console.error(LOG_PREFIX, error);
-        toast('error', error?.message || '카드를 교환하지 못했어요.');
+        if (error?.name === 'AbortError') {
+            toast('info', '교환을 취소했어.');
+        } else {
+            console.error(LOG_PREFIX, error);
+            toast('error', error?.message || '카드를 교환하지 못했어요.');
+        }
     } finally {
         setBusy(false);
         renderModal();
@@ -599,6 +670,68 @@ async function deleteSaved(id) {
     renderModal();
 }
 
+function triggerFileDownload(filename, text) {
+    const blob = new Blob([text], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportSavedData() {
+    const data = await loadData();
+    const payload = {
+        app: 'sweet-swap',
+        exportVersion: 1,
+        exportedAt: nowIso(),
+        saved: data.saved || {},
+    };
+    const stamp = new Date().toISOString().slice(0, 10);
+    triggerFileDownload(`sweet-swap-backup-${stamp}.json`, JSON.stringify(payload, null, 2));
+    toast('success', '비밀 서랍을 내보냈어.');
+}
+
+function mergeSavedBackup(incoming) {
+    if (!incoming || typeof incoming !== 'object') throw new Error('올바른 백업 파일이 아니에요.');
+    let added = 0;
+    for (const [scopeKey, list] of Object.entries(incoming)) {
+        if (!Array.isArray(list)) continue;
+        dataCache.saved[scopeKey] ??= [];
+        const existingIds = new Set(dataCache.saved[scopeKey].map(item => item.id));
+        for (const item of list) {
+            if (!item?.id || existingIds.has(item.id)) continue;
+            dataCache.saved[scopeKey].push(item);
+            existingIds.add(item.id);
+            added++;
+        }
+        dataCache.saved[scopeKey].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        const cap = Math.max(1, Number(settings().keepSaved) || 50);
+        dataCache.saved[scopeKey] = dataCache.saved[scopeKey].slice(0, cap);
+    }
+    return added;
+}
+
+async function importSavedFile(file) {
+    if (!file) return;
+    try {
+        await loadData();
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        const incoming = parsed?.saved && typeof parsed.saved === 'object' ? parsed.saved : parsed;
+        const added = mergeSavedBackup(incoming);
+        await saveData();
+        toast('success', added ? `${added}개의 교환 기록을 가져왔어.` : '새로 추가된 기록은 없었어.');
+        renderModal();
+    } catch (error) {
+        console.error(LOG_PREFIX, error);
+        toast('error', error?.message || '백업 파일을 가져오지 못했어요.');
+    }
+}
+
 function setBusy(value, label = '') {
     state.busy = value;
     const overlay = document.getElementById('sweet-swap-overlay');
@@ -607,6 +740,7 @@ function setBusy(value, label = '') {
     const labelElement = overlay.querySelector('.ss-busy-label');
     if (labelElement) labelElement.textContent = label;
     overlay.querySelectorAll('button, input, textarea, select').forEach(element => {
+        if (element.dataset.action === 'cancel-busy' || element.dataset.action === 'close') return;
         element.disabled = value;
     });
 }
@@ -727,6 +861,14 @@ function settingsTabHtml() {
         <label class="ss-switch-row"><div><b>장면 시작 후 자동으로 카드 태우기</b><small>비밀 서랍에 보관한 기록은 삭제하지 않아요.</small></div><input id="ss-auto-burn" type="checkbox" ${s.autoBurnAfterStart ? 'checked' : ''}><i></i></label>
         <label class="ss-setting-field"><div><b>캐릭터별 보관 개수</b><small>오래된 기록부터 자동 정리돼요.</small></div><input id="ss-keep" type="number" min="1" max="200" value="${escapeHtml(s.keepSaved)}"></label>
         <div class="ss-info-box">카드 생성·두 장 섞기: <b>${escapeHtml(profileName)}</b> 전용 연결 프로필 사용<br>장면 시작: SillyTavern 메인 연결 사용<br><br>전용 프로필은 확장 설정 패널에서 선택해요. 백그라운드 요청 중에도 메인 연결은 바뀌지 않아요.</div>
+        <div class="ss-backup-row">
+            <div><b>비밀 서랍 백업</b><small>브라우저 데이터가 사라지면 서랍 기록도 함께 사라져요. JSON으로 내보내거나 가져올 수 있어요.</small></div>
+            <div class="ss-backup-actions">
+                <button class="ss-secondary" data-action="export-saved">내보내기</button>
+                <button class="ss-secondary" data-action="import-saved">가져오기</button>
+                <input id="ss-import-file" type="file" accept="application/json" hidden>
+            </div>
+        </div>
     </section>`;
 }
 
@@ -744,7 +886,7 @@ function modalHtml() {
                 <button data-tab="settings" class="${state.tab === 'settings' ? 'is-active' : ''}">⚙️ 설정</button>
             </nav>
             <main class="ss-content">${body}</main>
-            <div class="ss-busy"><div class="ss-spinner"></div><b class="ss-busy-label">준비 중…</b></div>
+            <div class="ss-busy"><div class="ss-spinner"></div><b class="ss-busy-label">준비 중…</b><button class="ss-secondary" data-action="cancel-busy">취소</button></div>
         </div>
     </div>`;
 }
@@ -849,6 +991,8 @@ async function openModal(tab = 'swap') {
 }
 
 function closeModal() {
+    if (state.busy) cancelBackgroundGenerate();
+    flushDraftSave();
     document.getElementById('sweet-swap-overlay')?.remove();
     document.documentElement.classList.remove('ss-modal-open');
 }
@@ -856,37 +1000,53 @@ function closeModal() {
 async function handleClick(event) {
     const tab = event.target.closest('[data-tab]')?.dataset.tab;
     if (tab) {
-        if (state.tab === 'swap') {
-            const candidate = readUserForm();
-            if (cardHasContent(candidate)) state.userCard = candidate;
-        }
+        clearTimeout(draftSaveTimer);
+        captureUserFormIfVisible();
+        await persistDraft();
         state.tab = tab;
         renderModal();
         return;
     }
 
     const button = event.target.closest('[data-action]');
-    if (!button || state.busy) return;
+    if (!button) return;
     const action = button.dataset.action;
+    if (action === 'cancel-busy') return cancelBackgroundGenerate();
     if (action === 'close') return closeModal();
+    if (state.busy) return;
     if (action === 'seal-user' || action === 'regenerate-character') return generateCharacterCard();
     if (action === 'exchange') return exchangeCards();
     if (action === 'start') return startScene();
     if (action === 'save') return saveExchange();
-    if (action === 'burn') return burnCurrent(true);
+    if (action === 'burn') {
+        if (!confirm('정말 카드를 태울까? 비밀 서랍에 보관하지 않은 내용은 사라져.')) return;
+        return burnCurrent(true);
+    }
     if (action === 'select-saved') {
         state.selectedSavedId = button.dataset.id;
         return renderModal();
     }
-    if (action === 'delete-saved') return deleteSaved(button.dataset.id);
+    if (action === 'delete-saved') {
+        if (!confirm('이 보관 기록을 삭제할까? 되돌릴 수 없어.')) return;
+        return deleteSaved(button.dataset.id);
+    }
     if (action === 'start-saved') {
         const list = dataCache?.saved?.[currentScope().key] || [];
         state.exchange = list.find(item => item.id === button.dataset.id) || null;
         return startScene();
     }
+    if (action === 'export-saved') return exportSavedData();
+    if (action === 'import-saved') return document.getElementById('ss-import-file')?.click();
 }
 
 function handleChange(event) {
+    if (event.target.id === 'ss-import-file') {
+        const file = event.target.files?.[0];
+        importSavedFile(file);
+        event.target.value = '';
+        return;
+    }
+
     if (event.target.id === 'ss-mode') {
         const candidate = readUserForm();
         if (cardHasContent(candidate)) state.userCard = candidate;
@@ -924,8 +1084,12 @@ function installGlobalHandlers() {
         if (event.target.id === 'sweet-swap-profile') return handleProfileChange(event);
         if (event.target.closest('#sweet-swap-overlay')) handleChange(event);
     });
+    document.addEventListener('input', event => {
+        if (!event.target.closest('#sweet-swap-overlay')) return;
+        if (DRAFT_FIELD_IDS.includes(event.target.id)) scheduleDraftSave();
+    });
     document.addEventListener('keydown', event => {
-        if (event.key === 'Escape' && document.getElementById('sweet-swap-overlay') && !state.busy) closeModal();
+        if (event.key === 'Escape' && document.getElementById('sweet-swap-overlay')) closeModal();
     });
 }
 
