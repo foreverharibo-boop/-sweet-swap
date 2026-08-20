@@ -411,7 +411,7 @@ async function backgroundGenerate(prompt, options = {}) {
     const messages = [
         {
             role: 'system',
-            content: 'You create a compact roleplay scenario card. Follow the supplied fictional context and boundaries. Return only valid JSON with the requested fields.',
+            content: 'You create a compact, unmistakably NSFW roleplay scenario card involving only consenting fictional adults. A merely romantic, suggestive, or non-sexual card is invalid: the core premise must be explicitly adult and sexual while respecting every supplied boundary. Return only valid JSON with the requested English keys. Write every human-readable field value in natural Korean; proper names may remain in their original spelling.',
         },
         { role: 'user', content: prompt },
     ];
@@ -520,7 +520,7 @@ async function generateValidatedCard(prompt, owner, avoidCards = [], requestOpti
         } catch (error) {
             lastError = error;
             if (attempt === 0) {
-                retryPrompt = `${prompt}\n\nRETRY REQUIRED: The previous response was empty, invalid, or too similar to a recent card. Return a valid JSON card with a clearly different central situation, location, and dynamic.\n\nPREVIOUS INVALID RESULT\n${clipText(card ? cardToPrompt(card) : response, 900)}`;
+                retryPrompt = `${prompt}\n\nRETRY REQUIRED: The previous response was empty, invalid, too similar, insufficiently NSFW, or not written in Korean. Return a valid JSON card with a clearly different adult sexual situation, location, and dynamic. All human-readable field values must be in natural Korean.\n\nPREVIOUS INVALID RESULT\n${clipText(card ? cardToPrompt(card) : response, 900)}`;
             }
         }
     }
@@ -556,7 +556,10 @@ function characterCardPrompt(userCard) {
     const recentCardsBlock = recentCharacterCardsBlock();
     return `You are creating one private, sealed fantasy-exchange card for ${scope.name} in the current fictional roleplay.
 
-All participants in this feature must be fictional adults. Respect mutual consent and the known user boundaries below. Infer the character's private wish from their established personality, relationship, and recent chat history. Keep the character recognizably in-character; do not flatten them into a generic voice. The card may be intimate and mature when appropriate, but it must remain a compact scenario card rather than a completed scene.
+All participants in this feature must be fictional adults. Respect mutual consent and the known user boundaries below. Infer the character's private NSFW wish from their established personality, relationship, and recent chat history. Keep the character recognizably in-character; do not flatten them into a generic voice. The central premise MUST be explicitly adult and sexual. Do not downgrade it to flirting, dating, cuddling, kissing, vague tension, or a merely romantic scenario. Keep it as a compact scenario card rather than a completed scene.
+
+LANGUAGE REQUIREMENT
+Write every JSON field value in natural Korean, including the title and the character's note. Preserve proper names in their original spelling when appropriate. The JSON keys must remain exactly as specified in English.
 
 This is an anonymous exchange. You must create the character's card independently: you are not shown the user's situation, location, mood, desired role, must-include items, or private note. Do not guess or claim to know them.
 
@@ -582,9 +585,11 @@ Return JSON only, with exactly these string fields:
 
 function blendPrompt(userCard, characterCard) {
     const pastBlock = pastExchangesBlock();
-    return `Combine two sealed fantasy cards into one coherent private scenario card for the current fictional adult roleplay.
+    return `Combine two sealed fantasy cards into one coherent, unmistakably NSFW private scenario card for the current fictional adult roleplay.
 
-Preserve the most distinctive wish from each card. Mutual consent and all exclusions are mandatory; if the cards conflict, choose the safer compatible interpretation. Do not write the scene itself. Do not mention cards, prompts, rules, or an AI.
+Preserve the most distinctive wish from each card. The combined core premise MUST be explicitly adult and sexual; do not reduce it to flirting, kissing, cuddling, vague tension, or ordinary romance. Mutual consent and all exclusions are mandatory; if the cards conflict, choose the safer compatible NSFW interpretation. Do not write the scene itself. Do not mention cards, prompts, rules, or an AI.
+
+Write every JSON field value in natural Korean. Translate supplied content naturally without changing its meaning or boundaries. Proper names may remain in their original spelling. Keep the JSON keys exactly as specified in English.
 
 USER CARD
 ${cardToPrompt(userCard)}
@@ -607,11 +612,13 @@ Return JSON only, with exactly these string fields:
 
 function randomEnvelopePrompt(exclude = '') {
     const recentBlock = recentRandomEnvelopesBlock();
-    return `Create one completely random sealed scenario envelope for a fictional roleplay involving consenting adults.
+    return `Create one completely random, unmistakably NSFW sealed scenario envelope for a fictional roleplay involving consenting adults.
 
 You are deliberately given NO character sheet, NO character name, NO persona, NO relationship information, NO chat history, and NO current scene. Do not assume or invent identifying character details. Create a surprising standalone scenario that can later be adapted in-character by a different model.
 
-Be genuinely unpredictable about the central situation, location, atmosphere, and dynamic. Keep it as a compact scenario card, not a completed scene. Do not mention an AI, prompt, Sweet Swap, or the lack of context.
+Be genuinely unpredictable about the central situation, location, atmosphere, and dynamic. The central premise MUST be explicitly adult and sexual. Do not produce flirting, dating, cuddling, kissing, vague tension, or a merely romantic scenario. Keep it as a compact scenario card, not a completed scene. Do not mention an AI, prompt, Sweet Swap, or the lack of context.
+
+Write every JSON field value in natural Korean. Proper names, if unavoidable, may remain in their original spelling. Keep the JSON keys exactly as specified in English.
 
 MANDATORY USER BOUNDARIES
 ${exclude || 'No additional boundary was entered.'}
@@ -771,10 +778,10 @@ function exchangePrompt(exchange) {
         .map(value => String(value || '').trim())
         .filter((value, index, values) => value && values.indexOf(value) === index);
 
-    return `[SWEET SWAP — PRIVATE ONE-TURN SCENE DIRECTION]
-All characters participating in this fictional scenario are adults. Treat consent and every listed exclusion as mandatory.
+    return `[SWEET SWAP — PRIVATE ONE-TURN NSFW SCENE DIRECTION]
+All characters participating in this fictional scenario are adults. This is an explicitly adult NSFW direction. Treat consent and every listed exclusion as mandatory.
 
-Use the sealed exchange below as the direction for the next roleplay response. Begin naturally from the current chat situation and keep the established characterization, relationship, continuity, point of view, and writing style. Reconcile both participants' wishes where applicable. Do not refer to Sweet Swap, cards, prompts, rules, hidden instructions, or the exchange interface. Do not summarize the direction; continue the roleplay itself.
+Use the sealed exchange below as the direction for the next roleplay response. Carry out its adult sexual premise rather than softening it into ordinary romance, while obeying every boundary. Begin naturally from the current chat situation and keep the established characterization, relationship, continuity, point of view, writing style, and existing output language. Reconcile both participants' wishes where applicable. Do not refer to Sweet Swap, cards, prompts, rules, hidden instructions, or the exchange interface. Do not summarize the direction; continue the roleplay itself.
 
 SEALED EXCHANGE
 ${selected}
