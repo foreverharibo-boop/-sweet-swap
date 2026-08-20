@@ -35,6 +35,9 @@ const state = {
     promptArmed: false,
     promptConsumed: false,
     promptScopeKey: null,
+    promptExchange: null,
+    promptTurn: 0,
+    promptTurnsTotal: 0,
 };
 
 let dataCache = null;
@@ -761,7 +764,27 @@ async function exchangeCards() {
     }
 }
 
-function exchangePrompt(exchange) {
+function sceneTurnCount(mode) {
+    return ['blend', 'blind', 'simultaneous', 'partial'].includes(mode) ? 3 : 1;
+}
+
+function stagedSceneDirection(turn, total) {
+    if (total <= 1) {
+        return 'Apply the sealed exchange in this response and establish its situation clearly enough for later chat messages to continue it.';
+    }
+    if (turn <= 1) {
+        return `PHASE 1 OF ${total} — TRANSITION AND SETUP
+Do not rush through the entire scenario in one response. If the card location differs from the current location, create a plausible reason to move and begin a gradual transition; do not jump there and complete the premise immediately. If the current location already fits, use this response for natural buildup. Preserve normal conversational pacing.`;
+    }
+    if (turn === 2) {
+        return `PHASE 2 OF ${total} — ARRIVAL AND BUILDUP
+Continue directly from the previous response without restarting, recapping, or repeating the transition. Complete the arrival where needed, clearly establish the new location and atmosphere, and begin the card's adult premise gradually. Do not resolve the entire scenario yet.`;
+    }
+    return `PHASE ${turn} OF ${total} — FULL CONTINUATION
+Continue directly from the existing scene without restarting or summarizing it. Now carry the card's adult premise forward naturally and fully while preserving the established pacing. Do not force an ending; leave the scene able to continue from chat history after this hidden direction is removed.`;
+}
+
+function exchangePrompt(exchange, turn = 1, total = 1) {
     if (!exchange) return '';
     let selected;
     if (exchange.mode === 'random') selected = cardToPrompt(exchange.randomCard);
@@ -782,6 +805,9 @@ function exchangePrompt(exchange) {
 All characters participating in this fictional scenario are adults. This is an explicitly adult NSFW direction. Treat consent and every listed exclusion as mandatory.
 
 Use the sealed exchange below as the direction for the next roleplay response. Carry out its adult sexual premise rather than softening it into ordinary romance, while obeying every boundary. Begin naturally from the current chat situation and keep the established characterization, relationship, continuity, point of view, writing style, and existing output language. Reconcile both participants' wishes where applicable. Do not refer to Sweet Swap, cards, prompts, rules, hidden instructions, or the exchange interface. Do not summarize the direction; continue the roleplay itself.
+
+CURRENT PACING PHASE
+${stagedSceneDirection(turn, total)}
 
 SEALED EXCHANGE
 ${selected}
@@ -820,6 +846,26 @@ async function clearOneShotPrompt() {
     state.promptArmed = false;
     state.promptConsumed = false;
     state.promptScopeKey = null;
+    state.promptExchange = null;
+    state.promptTurn = 0;
+    state.promptTurnsTotal = 0;
+}
+
+async function advanceScenePrompt() {
+    if (!state.promptArmed || !state.promptConsumed) return;
+    if (!state.promptExchange || state.promptTurn >= state.promptTurnsTotal) {
+        await clearOneShotPrompt();
+        return;
+    }
+
+    state.promptTurn += 1;
+    state.promptConsumed = false;
+    try {
+        await setOneShotPrompt(exchangePrompt(state.promptExchange, state.promptTurn, state.promptTurnsTotal));
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} failed to advance scene prompt`, error);
+        await clearOneShotPrompt();
+    }
 }
 
 async function triggerMainGeneration() {
@@ -843,15 +889,20 @@ async function startScene() {
 
     setBusy(true, '봉인을 열고 장면을 준비하는 중…');
     try {
-        await setOneShotPrompt(exchangePrompt(state.exchange));
+        const promptExchange = structuredClone(state.exchange);
+        const promptTurnsTotal = sceneTurnCount(promptExchange.mode);
+        await setOneShotPrompt(exchangePrompt(promptExchange, 1, promptTurnsTotal));
         state.promptArmed = true;
         state.promptConsumed = false;
         state.promptScopeKey = currentScope().key;
+        state.promptExchange = promptExchange;
+        state.promptTurn = 1;
+        state.promptTurnsTotal = promptTurnsTotal;
         closeModal();
 
         const started = await triggerMainGeneration();
-        if (started) toast('success', '교환 결과로 장면을 시작했어.');
-        else toast('info', '다음 메시지를 보내면 교환 결과가 한 번 적용돼.');
+        if (started) toast('success', promptTurnsTotal > 1 ? '교환 결과를 3턴에 걸쳐 천천히 시작했어.' : '교환 결과로 장면을 시작했어.');
+        else toast('info', promptTurnsTotal > 1 ? '다음 메시지부터 교환 결과가 3턴 동안 단계적으로 적용돼.' : '다음 메시지를 보내면 교환 결과가 한 번 적용돼.');
 
         if (settings().autoBurnAfterStart) {
             if (state.exchange?.mode === 'random') await burnRandomEnvelope(false);
@@ -1112,7 +1163,7 @@ function swapTabHtml() {
 
         <section class="ss-paper ss-character-paper">
             <div class="ss-section-title"><span>02</span><div><b>${escapeHtml(currentScope().name)}의 카드</b><small>현재 관계와 채팅을 바탕으로 조용히 작성돼.</small></div></div>
-            ${charReady ? cardHtml(state.characterCard, { hidden: !state.exchange, kicker: state.exchange ? '상대의 카드' : '' }) : '<div class="ss-waiting-envelope"><div>💌</div><b>아직 편지가 오지 않았어요</b><small>내 카드를 봉인하면 상대가 답장을 써요.</small></div>'}
+            ${charReady ? cardHtml(state.characterCard, { hidden: true }) : '<div class="ss-waiting-envelope"><div>💌</div><b>아직 편지가 오지 않았어요</b><small>내 카드를 봉인하면 상대가 답장을 써요.</small></div>'}
             ${charReady ? '<button class="ss-secondary" data-action="regenerate-character">상대 카드 다시 받기</button>' : ''}
         </section>
     </div>
@@ -1477,7 +1528,7 @@ function installGenerationCleanup() {
     }
     if (types.GENERATION_ENDED) {
         events.on(types.GENERATION_ENDED, async () => {
-            if (state.promptArmed && state.promptConsumed) await clearOneShotPrompt();
+            if (state.promptArmed && state.promptConsumed) await advanceScenePrompt();
         });
     }
     if (types.GENERATION_STOPPED) {
