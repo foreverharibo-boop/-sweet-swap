@@ -418,7 +418,7 @@ async function backgroundGenerate(prompt, options = {}) {
     const controller = new AbortController();
     activeAbortController = controller;
     try {
-        const output = await service.sendRequest(profile.id, messages, 1000, {
+        const output = await service.sendRequest(profile.id, messages, 3000, {
             stream: false,
             signal: controller.signal,
             extractData: true,
