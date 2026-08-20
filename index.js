@@ -13,6 +13,7 @@ const DEFAULT_SETTINGS = Object.freeze({
 });
 
 const MODE_LABELS = Object.freeze({
+    random: '🎲 완전 랜덤 봉투',
     draw: '한 장 뽑기',
     blend: '두 장 섞기',
     blind: '블라인드 시작',
@@ -28,6 +29,7 @@ const state = {
     userCard: null,
     characterCard: null,
     exchange: null,
+    randomExclude: '',
     selectedSavedId: null,
     scopeKey: null,
     promptArmed: false,
@@ -42,8 +44,10 @@ let cachedConnectionProfiles = [];
 let modalViewportGuardInstalled = false;
 let draftSaveTimer = null;
 let activeAbortController = null;
+let modalPinFrame = null;
+let modalPinTimer = null;
 
-const DRAFT_FIELD_IDS = ['ss-title', 'ss-situation', 'ss-location', 'ss-mood', 'ss-role', 'ss-must', 'ss-exclude', 'ss-note'];
+const DRAFT_FIELD_IDS = ['ss-title', 'ss-situation', 'ss-location', 'ss-mood', 'ss-role', 'ss-must', 'ss-exclude', 'ss-note', 'ss-random-exclude'];
 
 function context() {
     return globalThis.SillyTavern?.getContext?.() ?? null;
@@ -126,7 +130,7 @@ function currentScope() {
 }
 
 function emptyData() {
-    return { version: 1, drafts: {}, saved: {} };
+    return { version: 3, drafts: {}, saved: {}, recentCharacterCards: {}, recentRandomEnvelopes: [] };
 }
 
 async function loadData() {
@@ -138,12 +142,14 @@ async function loadData() {
         } catch {
             dataCache = emptyData();
         }
-        return dataCache;
+    } else {
+        dataCache = await store.getItem(DATA_KEY) || emptyData();
     }
-    dataCache = await store.getItem(DATA_KEY) || emptyData();
-    dataCache.version ??= 1;
+    dataCache.version = Math.max(3, Number(dataCache.version) || 1);
     dataCache.drafts ??= {};
     dataCache.saved ??= {};
+    dataCache.recentCharacterCards ??= {};
+    dataCache.recentRandomEnvelopes ??= [];
     return dataCache;
 }
 
@@ -160,6 +166,7 @@ async function loadScopeState() {
     state.userCard = draft?.userCard || null;
     state.characterCard = draft?.characterCard || null;
     state.exchange = draft?.exchange || null;
+    state.randomExclude = draft?.randomExclude || '';
     state.mode = draft?.mode || settings().defaultMode;
     state.selectedSavedId = null;
     state.scopeKey = scope.key;
@@ -172,6 +179,7 @@ async function persistDraft() {
         userCard: state.userCard,
         characterCard: state.characterCard,
         exchange: state.exchange,
+        randomExclude: state.randomExclude,
         mode: state.mode,
         updatedAt: nowIso(),
     };
@@ -180,9 +188,23 @@ async function persistDraft() {
 
 function captureUserFormIfVisible() {
     if (state.tab !== 'swap') return;
+    if (state.mode === 'random') {
+        state.randomExclude = document.getElementById('ss-random-exclude')?.value?.trim() || '';
+        return;
+    }
     if (!document.getElementById('ss-title')) return;
     const candidate = readUserForm();
-    if (cardHasContent(candidate)) state.userCard = candidate;
+    state.userCard = cardHasContent(candidate) ? candidate : null;
+}
+
+function invalidateExchangeAfterUserEdit() {
+    if (!state.exchange) return;
+    state.exchange = null;
+    const overlay = document.getElementById('sweet-swap-overlay');
+    const result = overlay?.querySelector('.ss-exchange-panel .ss-result');
+    if (result) result.innerHTML = exchangeResultHtml(null);
+    overlay?.querySelector('.ss-exchange-panel .ss-result-actions')?.remove();
+    toast('info', '카드 내용을 바꿨으니 다시 교환해줘.');
 }
 
 function scheduleDraftSave() {
@@ -268,6 +290,15 @@ function safeJson(text) {
     }
 }
 
+function isAbortError(error) {
+    let current = error;
+    for (let depth = 0; current && depth < 5; depth++) {
+        if (current.name === 'AbortError') return true;
+        current = current.cause;
+    }
+    return false;
+}
+
 async function loadConnectionService() {
     const fromContext = context()?.ConnectionManagerRequestService;
     if (fromContext) return fromContext;
@@ -318,6 +349,16 @@ function clipText(value, maxLength) {
     return `${text.slice(0, maxLength)}\n[truncated]`;
 }
 
+function plainMessageText(value) {
+    const source = String(value ?? '')
+        .replace(/<br\s*\/?\s*>/gi, '\n')
+        .replace(/<\/p\s*>/gi, '\n');
+    if (!source.includes('<') || typeof globalThis.document?.createElement !== 'function') return source;
+    const holder = globalThis.document.createElement('div');
+    holder.innerHTML = source;
+    return holder.textContent || holder.innerText || '';
+}
+
 function currentRoleplayContext() {
     const ctx = context();
     if (!ctx) return 'No roleplay context is available.';
@@ -326,9 +367,9 @@ function currentRoleplayContext() {
     const characterData = character?.data || character || {};
     const profile = [
         character?.name && `Name: ${character.name}`,
-        characterData.description && `Description: ${clipText(characterData.description, 4500)}`,
-        characterData.personality && `Personality: ${clipText(characterData.personality, 3000)}`,
-        characterData.scenario && `Scenario: ${clipText(characterData.scenario, 3000)}`,
+        characterData.description && `Description: ${clipText(characterData.description, 3000)}`,
+        characterData.personality && `Personality: ${clipText(characterData.personality, 2200)}`,
+        characterData.scenario && `Scenario: ${clipText(characterData.scenario, 2200)}`,
     ].filter(Boolean);
 
     if (ctx.groupId) {
@@ -341,14 +382,17 @@ function currentRoleplayContext() {
         profile.unshift(`Group: ${group?.name || currentScope().name}${members.length ? `\nMembers: ${members.join(', ')}` : ''}`);
     }
 
-    const recentChat = (ctx.chat || []).slice(-20).map(message => {
-        const content = clipText(message?.mes ?? message?.text ?? message?.content, 1800);
-        if (!content) return '';
-        const speaker = message?.is_user
-            ? (ctx.name1 || 'User')
-            : (message?.name || character?.name || ctx.name2 || 'Character');
-        return `${speaker}: ${content}`;
-    }).filter(Boolean).join('\n\n');
+    const recentChat = (ctx.chat || [])
+        .filter(message => !message?.is_system && !message?.is_hidden && !message?.extra?.hidden && !message?.extra?.isSmallSys)
+        .slice(-8)
+        .map(message => {
+            const content = clipText(plainMessageText(message?.mes ?? message?.text ?? message?.content), 1200);
+            if (!content) return '';
+            const speaker = message?.is_user
+                ? (ctx.name1 || 'User')
+                : (message?.name || character?.name || ctx.name2 || 'Character');
+            return `${speaker}: ${content}`;
+        }).filter(Boolean).join('\n\n');
 
     return [
         profile.length ? `CHARACTER / GROUP\n${profile.join('\n\n')}` : '',
@@ -362,7 +406,7 @@ function cancelBackgroundGenerate() {
     activeAbortController = null;
 }
 
-async function backgroundGenerate(prompt) {
+async function backgroundGenerate(prompt, options = {}) {
     const { service, profile } = await selectedConnection();
     const messages = [
         {
@@ -378,8 +422,8 @@ async function backgroundGenerate(prompt) {
             stream: false,
             signal: controller.signal,
             extractData: true,
-            includePreset: true,
-            includeInstruct: true,
+            includePreset: options.includePreset ?? true,
+            includeInstruct: options.includeInstruct ?? true,
         });
         const content = typeof output === 'string' ? output : output?.content ?? output?.text;
         if (!content) throw new Error('전용 연결 프로필에서 빈 응답이 돌아왔어요.');
@@ -389,6 +433,101 @@ async function backgroundGenerate(prompt) {
     }
 }
 
+function comparableCardText(card) {
+    const fields = card?.fields || {};
+    return [fields.situation, fields.location, fields.mood, fields.desiredRole, fields.mustInclude]
+        .filter(Boolean)
+        .join(' ')
+        .normalize('NFKC')
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+        .trim();
+}
+
+function cardTextBigrams(text) {
+    const compact = text.replace(/\s+/g, '');
+    const result = new Set();
+    for (let index = 0; index < compact.length - 1; index++) result.add(compact.slice(index, index + 2));
+    return result;
+}
+
+function cardSimilarity(left, right) {
+    const a = comparableCardText(left);
+    const b = comparableCardText(right);
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    const aSet = cardTextBigrams(a);
+    const bSet = cardTextBigrams(b);
+    if (!aSet.size || !bSet.size) return 0;
+    let shared = 0;
+    for (const item of aSet) if (bSet.has(item)) shared++;
+    return (2 * shared) / (aSet.size + bSet.size);
+}
+
+function recentCharacterCards(limit = 3) {
+    const scopeKey = state.scopeKey || currentScope().key;
+    return (dataCache?.recentCharacterCards?.[scopeKey] || []).slice(0, limit);
+}
+
+function recentCharacterCardsBlock() {
+    const cards = recentCharacterCards(3);
+    if (!cards.length) return '';
+    return `RECENT CHARACTER CARDS — DO NOT REPEAT OR CLOSELY PARAPHRASE THESE CONCEPTS
+${cards.map((card, index) => `${index + 1}. ${clipText(cardToPrompt(card), 900)}`).join('\n\n')}`;
+}
+
+async function rememberCharacterCard(card) {
+    const data = await loadData();
+    const scopeKey = state.scopeKey || currentScope().key;
+    data.recentCharacterCards[scopeKey] ??= [];
+    data.recentCharacterCards[scopeKey].unshift(structuredClone(card));
+    data.recentCharacterCards[scopeKey] = data.recentCharacterCards[scopeKey].slice(0, 3);
+}
+
+function recentRandomEnvelopes(limit = 3) {
+    return (dataCache?.recentRandomEnvelopes || []).slice(0, limit);
+}
+
+function recentRandomEnvelopesBlock() {
+    const cards = recentRandomEnvelopes(3);
+    if (!cards.length) return '';
+    return `RECENT RANDOM ENVELOPES — DO NOT REPEAT OR CLOSELY PARAPHRASE THESE CONCEPTS
+${cards.map((card, index) => `${index + 1}. ${clipText(cardToPrompt(card), 900)}`).join('\n\n')}`;
+}
+
+async function rememberRandomEnvelope(card) {
+    const data = await loadData();
+    data.recentRandomEnvelopes.unshift(structuredClone(card));
+    data.recentRandomEnvelopes = data.recentRandomEnvelopes.slice(0, 3);
+}
+
+async function generateValidatedCard(prompt, owner, avoidCards = [], requestOptions = {}) {
+    let retryPrompt = prompt;
+    let lastError = null;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await backgroundGenerate(retryPrompt, requestOptions);
+        let card = null;
+        try {
+            const parsed = safeJson(response);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('올바른 카드 내용이 아니에요.');
+            card = makeCard(owner, parsed);
+            if (!cardHasContent(card)) throw new Error('AI가 내용이 비어 있는 카드를 보냈어요.');
+            if (avoidCards.some(previous => cardSimilarity(card, previous) >= 0.82)) {
+                throw new Error('최근 캐릭터 카드와 너무 비슷한 카드가 나왔어요.');
+            }
+            return card;
+        } catch (error) {
+            lastError = error;
+            if (attempt === 0) {
+                retryPrompt = `${prompt}\n\nRETRY REQUIRED: The previous response was empty, invalid, or too similar to a recent card. Return a valid JSON card with a clearly different central situation, location, and dynamic.\n\nPREVIOUS INVALID RESULT\n${clipText(card ? cardToPrompt(card) : response, 900)}`;
+            }
+        }
+    }
+
+    throw lastError || new Error('카드를 제대로 만들지 못했어요.');
+}
+
 function recentSavedExchanges(limit = 2) {
     const list = dataCache?.saved?.[currentScope().key] || [];
     return list.slice(0, limit);
@@ -396,6 +535,7 @@ function recentSavedExchanges(limit = 2) {
 
 function exchangeRecapLine(exchange) {
     const pick = card => clipText(card?.fields?.situation || card?.fields?.title || '', 160);
+    if (exchange.mode === 'random') return pick(exchange.randomCard);
     if (exchange.mode === 'blend') return pick(exchange.combinedCard);
     if (exchange.mode === 'draw') return pick(exchange.chosen === 'character' ? exchange.characterCard : exchange.userCard);
     const a = pick(exchange.userCard);
@@ -413,6 +553,7 @@ ${lines.map((line, index) => `${index + 1}. ${line}`).join('\n')}`;
 function characterCardPrompt(userCard) {
     const scope = currentScope();
     const pastBlock = pastExchangesBlock();
+    const recentCardsBlock = recentCharacterCardsBlock();
     return `You are creating one private, sealed fantasy-exchange card for ${scope.name} in the current fictional roleplay.
 
 All participants in this feature must be fictional adults. Respect mutual consent and the known user boundaries below. Infer the character's private wish from their established personality, relationship, and recent chat history. Keep the character recognizably in-character; do not flatten them into a generic voice. The card may be intimate and mature when appropriate, but it must remain a compact scenario card rather than a completed scene.
@@ -425,6 +566,7 @@ ${userCard?.fields?.exclude || 'No additional boundary was entered.'}
 CURRENT ROLEPLAY CONTEXT
 ${currentRoleplayContext()}
 ${pastBlock ? `\n${pastBlock}\n` : ''}
+${recentCardsBlock ? `\n${recentCardsBlock}\n` : ''}
 Return JSON only, with exactly these string fields:
 {
   "title": "short evocative title",
@@ -463,6 +605,72 @@ Return JSON only, with exactly these string fields:
 }`;
 }
 
+function randomEnvelopePrompt(exclude = '') {
+    const recentBlock = recentRandomEnvelopesBlock();
+    return `Create one completely random sealed scenario envelope for a fictional roleplay involving consenting adults.
+
+You are deliberately given NO character sheet, NO character name, NO persona, NO relationship information, NO chat history, and NO current scene. Do not assume or invent identifying character details. Create a surprising standalone scenario that can later be adapted in-character by a different model.
+
+Be genuinely unpredictable about the central situation, location, atmosphere, and dynamic. Keep it as a compact scenario card, not a completed scene. Do not mention an AI, prompt, Sweet Swap, or the lack of context.
+
+MANDATORY USER BOUNDARIES
+${exclude || 'No additional boundary was entered.'}
+${recentBlock ? `\n${recentBlock}\n` : ''}
+Return JSON only, with exactly these string fields:
+{
+  "title": "short mysterious title",
+  "situation": "a completely random standalone scenario",
+  "location": "a specific unexpected location",
+  "mood": "the atmosphere",
+  "desiredRole": "a flexible dynamic that does not assume character identity",
+  "mustInclude": "one memorable random twist",
+  "exclude": "repeat all mandatory user boundaries; do not invent new ones",
+  "note": "a cryptic one-line note from the unknown sender"
+}`;
+}
+
+async function generateRandomEnvelope() {
+    if (!settings().ageConfirmed) {
+        toast('warning', '등장인물이 모두 성인임을 먼저 확인해줘.');
+        state.tab = 'settings';
+        renderModal();
+        return;
+    }
+
+    state.randomExclude = document.getElementById('ss-random-exclude')?.value?.trim() ?? state.randomExclude;
+    const recentCards = recentRandomEnvelopes(3);
+    setBusy(true, '아무것도 모르는 미지의 봉투를 만드는 중…');
+    try {
+        const randomCard = await generateValidatedCard(
+            randomEnvelopePrompt(state.randomExclude),
+            'random',
+            recentCards,
+            { includePreset: false, includeInstruct: true },
+        );
+        state.exchange = {
+            id: uid('swap'),
+            mode: 'random',
+            randomCard,
+            randomExclude: state.randomExclude,
+            revealed: false,
+            createdAt: nowIso(),
+        };
+        await rememberRandomEnvelope(randomCard);
+        await persistDraft();
+        toast('success', '미지의 랜덤 봉투가 도착했어.');
+    } catch (error) {
+        if (isAbortError(error)) {
+            toast('info', '랜덤 봉투 받기를 취소했어.');
+        } else {
+            console.error(LOG_PREFIX, error);
+            toast('error', error?.message || '랜덤 봉투를 만들지 못했어요.');
+        }
+    } finally {
+        setBusy(false);
+        renderModal();
+    }
+}
+
 async function generateCharacterCard() {
     const candidate = readUserForm();
     if (!cardHasContent(candidate)) {
@@ -479,13 +687,14 @@ async function generateCharacterCard() {
     state.userCard = candidate;
     setBusy(true, '상대의 봉인 카드를 작성하는 중…');
     try {
-        const result = safeJson(await backgroundGenerate(characterCardPrompt(candidate)));
-        state.characterCard = makeCard('character', result);
+        const recentCards = recentCharacterCards(3);
+        state.characterCard = await generateValidatedCard(characterCardPrompt(candidate), 'character', recentCards);
         state.exchange = null;
+        await rememberCharacterCard(state.characterCard);
         await persistDraft();
         toast('success', `${currentScope().name}의 카드가 도착했어.`);
     } catch (error) {
-        if (error?.name === 'AbortError') {
+        if (isAbortError(error)) {
             toast('info', '카드 생성을 취소했어.');
         } else {
             console.error(LOG_PREFIX, error);
@@ -498,8 +707,10 @@ async function generateCharacterCard() {
 }
 
 async function exchangeCards() {
+    if (state.mode === 'random') return generateRandomEnvelope();
+
     const candidate = readUserForm();
-    if (cardHasContent(candidate)) state.userCard = candidate;
+    state.userCard = cardHasContent(candidate) ? candidate : null;
     if (!cardHasContent(state.userCard)) {
         toast('warning', '내 카드를 먼저 봉인해줘.');
         return;
@@ -514,7 +725,7 @@ async function exchangeCards() {
         let combinedCard = null;
         let chosen = null;
         if (state.mode === 'blend') {
-            combinedCard = makeCard('result', safeJson(await backgroundGenerate(blendPrompt(state.userCard, state.characterCard))));
+            combinedCard = await generateValidatedCard(blendPrompt(state.userCard, state.characterCard), 'result');
         } else if (state.mode === 'draw') {
             chosen = Math.random() < 0.5 ? 'user' : 'character';
         }
@@ -531,7 +742,7 @@ async function exchangeCards() {
         await persistDraft();
         toast('success', `${MODE_LABELS[state.mode]} 교환이 끝났어.`);
     } catch (error) {
-        if (error?.name === 'AbortError') {
+        if (isAbortError(error)) {
             toast('info', '교환을 취소했어.');
         } else {
             console.error(LOG_PREFIX, error);
@@ -546,9 +757,19 @@ async function exchangeCards() {
 function exchangePrompt(exchange) {
     if (!exchange) return '';
     let selected;
-    if (exchange.mode === 'blend') selected = cardToPrompt(exchange.combinedCard);
+    if (exchange.mode === 'random') selected = cardToPrompt(exchange.randomCard);
+    else if (exchange.mode === 'blend') selected = cardToPrompt(exchange.combinedCard);
     else if (exchange.mode === 'draw') selected = cardToPrompt(exchange.chosen === 'character' ? exchange.characterCard : exchange.userCard);
     else selected = `USER CARD\n${cardToPrompt(exchange.userCard)}\n\nCHARACTER CARD\n${cardToPrompt(exchange.characterCard)}`;
+
+    const mandatoryBoundaries = [
+        exchange.randomExclude,
+        exchange.randomCard?.fields?.exclude,
+        exchange.userCard?.fields?.exclude,
+        exchange.characterCard?.fields?.exclude,
+    ]
+        .map(value => String(value || '').trim())
+        .filter((value, index, values) => value && values.indexOf(value) === index);
 
     return `[SWEET SWAP — PRIVATE ONE-TURN SCENE DIRECTION]
 All characters participating in this fictional scenario are adults. Treat consent and every listed exclusion as mandatory.
@@ -557,6 +778,9 @@ Use the sealed exchange below as the direction for the next roleplay response. B
 
 SEALED EXCHANGE
 ${selected}
+
+MANDATORY BOUNDARIES FROM BOTH PARTICIPANTS
+${mandatoryBoundaries.length ? mandatoryBoundaries.map(value => `- ${value}`).join('\n') : '- No additional boundaries were entered.'}
 [/SWEET SWAP]`;
 }
 
@@ -622,7 +846,10 @@ async function startScene() {
         if (started) toast('success', '교환 결과로 장면을 시작했어.');
         else toast('info', '다음 메시지를 보내면 교환 결과가 한 번 적용돼.');
 
-        if (settings().autoBurnAfterStart) await burnCurrent(false);
+        if (settings().autoBurnAfterStart) {
+            if (state.exchange?.mode === 'random') await burnRandomEnvelope(false);
+            else await burnCurrent(false);
+        }
     } catch (error) {
         await clearOneShotPrompt();
         console.error(LOG_PREFIX, error);
@@ -640,8 +867,9 @@ async function saveExchange() {
     const scope = currentScope();
     const data = await loadData();
     data.saved[scope.key] ??= [];
-    const exists = data.saved[scope.key].some(item => item.id === state.exchange.id);
-    if (!exists) data.saved[scope.key].unshift(structuredClone(state.exchange));
+    const existingIndex = data.saved[scope.key].findIndex(item => item.id === state.exchange.id);
+    if (existingIndex >= 0) data.saved[scope.key][existingIndex] = structuredClone(state.exchange);
+    else data.saved[scope.key].unshift(structuredClone(state.exchange));
     data.saved[scope.key] = data.saved[scope.key].slice(0, Math.max(1, Number(settings().keepSaved) || 50));
     await saveData();
     toast('success', '비밀 서랍에 보관했어.');
@@ -660,6 +888,21 @@ async function burnCurrent(showToast = true) {
     renderModal();
 }
 
+async function revealRandomEnvelope() {
+    if (state.exchange?.mode !== 'random') return;
+    state.exchange.revealed = true;
+    await persistDraft();
+    renderModal();
+}
+
+async function burnRandomEnvelope(showToast = true) {
+    if (state.exchange?.mode !== 'random') return;
+    state.exchange = null;
+    await persistDraft();
+    if (showToast) toast('info', '랜덤 봉투를 태웠어.');
+    renderModal();
+}
+
 async function deleteSaved(id) {
     const scope = currentScope();
     const data = await loadData();
@@ -667,6 +910,16 @@ async function deleteSaved(id) {
     if (state.selectedSavedId === id) state.selectedSavedId = null;
     await saveData();
     toast('info', '보관된 교환 기록을 삭제했어.');
+    renderModal();
+}
+
+async function revealSavedRandom(id) {
+    const scope = currentScope();
+    const data = await loadData();
+    const item = (data.saved[scope.key] || []).find(entry => entry.id === id);
+    if (!item || item.mode !== 'random') return;
+    item.revealed = true;
+    await saveData();
     renderModal();
 }
 
@@ -773,7 +1026,17 @@ function cardHtml(card, options = {}) {
 }
 
 function exchangeResultHtml(exchange) {
-    if (!exchange) return '<div class="ss-result-empty">카드 두 장을 준비한 뒤 교환해봐.</div>';
+    if (!exchange) {
+        return state.mode === 'random'
+            ? '<div class="ss-result-empty">아직 미지의 랜덤 봉투가 도착하지 않았어요.</div>'
+            : '<div class="ss-result-empty">카드 두 장을 준비한 뒤 교환해봐.</div>';
+    }
+    if (exchange.mode === 'random') {
+        if (!exchange.revealed) {
+            return `<article class="ss-card ss-card-hidden"><div class="ss-seal">🎲</div><strong>미지의 랜덤 봉투</strong><small>캐릭터도, 채팅도 모르는 AI가 완전히 무작위로 만들었어요.</small></article>`;
+        }
+        return cardHtml(exchange.randomCard, { kicker: '열어본 미지의 랜덤 봉투' });
+    }
     if (exchange.mode === 'blind') return cardHtml(null, { hidden: true });
     if (exchange.mode === 'blend') return cardHtml(exchange.combinedCard, { kicker: '두 장을 섞은 결과' });
     if (exchange.mode === 'draw') {
@@ -787,9 +1050,40 @@ function exchangeResultHtml(exchange) {
     return `<div class="ss-double-card">${cardHtml(exchange.userCard, { kicker: '나의 카드' })}${cardHtml(exchange.characterCard, { kicker: `${currentScope().name}의 카드` })}</div>`;
 }
 
+function randomSwapTabHtml(modes) {
+    const exchange = state.exchange?.mode === 'random' ? state.exchange : null;
+    return `<div class="ss-swap-grid">
+        <section class="ss-paper ss-user-paper">
+            <div class="ss-section-title"><span>🎲</span><div><b>완전 랜덤 봉투</b><small>캐릭터 시트·이름·관계·최근 채팅을 하나도 읽지 않아요.</small></div></div>
+            <div class="ss-info-box">AI에게는 모든 등장인물이 성인이라는 조건과 아래 제외 요소, 최근 랜덤 봉투 3장만 전달돼요. 실제 장면을 시작할 때는 메인 AI가 현재 캐릭터답게 이어갑니다.</div>
+            <label>랜덤 봉투에서도 제외할 요소<textarea id="ss-random-exclude" rows="4" placeholder="절대 나오면 안 되는 요소를 적어줘">${escapeHtml(state.randomExclude || '')}</textarea></label>
+        </section>
+
+        <section class="ss-paper ss-character-paper">
+            <div class="ss-section-title"><span>?</span><div><b>미지의 봉투</b><small>열어보기 전까지 내용은 완전히 봉인돼요.</small></div></div>
+            ${exchangeResultHtml(exchange)}
+        </section>
+    </div>
+
+    <section class="ss-exchange-panel">
+        <div class="ss-mode-row">
+            <label>교환 방식<select id="ss-mode">${modes}</select></label>
+            ${exchange ? '' : '<button class="ss-accent" data-action="exchange">랜덤 봉투 받기</button>'}
+        </div>
+        ${exchange ? `<div class="ss-result-actions">
+            ${exchange.revealed ? '' : '<button class="ss-secondary" data-action="reveal-random">봉투 열기</button>'}
+            <button class="ss-primary" data-action="start">${exchange.revealed ? '이 봉투로 장면 시작' : '봉인한 채 장면 시작'}</button>
+            <button class="ss-secondary" data-action="reroll-random">다시 뽑기</button>
+            <button class="ss-secondary" data-action="save">비밀 서랍에 보관</button>
+            <button class="ss-danger" data-action="burn-random">봉투 태우기</button>
+        </div>` : ''}
+    </section>`;
+}
+
 function swapTabHtml() {
     const f = state.userCard?.fields || {};
     const modes = Object.entries(MODE_LABELS).map(([value, label]) => `<option value="${value}" ${state.mode === value ? 'selected' : ''}>${label}</option>`).join('');
+    if (state.mode === 'random') return randomSwapTabHtml(modes);
     const charReady = Boolean(state.characterCard);
     return `<div class="ss-swap-grid">
         <section class="ss-paper ss-user-paper">
@@ -838,15 +1132,18 @@ function savedTabHtml() {
         return '<div class="ss-large-empty"><div>🗝️</div><b>비밀 서랍이 비어 있어요</b><p>마음에 드는 교환 결과를 보관하면 여기에 쌓여요.</p></div>';
     }
     const items = list.map(item => {
-        const title = item.combinedCard?.fields?.title
-            || (item.chosen === 'character' ? item.characterCard?.fields?.title : item.userCard?.fields?.title)
-            || MODE_LABELS[item.mode];
+        const title = item.mode === 'random' && !item.revealed
+            ? '봉인된 랜덤 봉투'
+            : item.randomCard?.fields?.title
+                || item.combinedCard?.fields?.title
+                || (item.chosen === 'character' ? item.characterCard?.fields?.title : item.userCard?.fields?.title)
+                || MODE_LABELS[item.mode];
         return `<button class="ss-saved-item ${state.selectedSavedId === item.id ? 'is-selected' : ''}" data-action="select-saved" data-id="${escapeHtml(item.id)}">
             <span>💌</span><div><b>${escapeHtml(title || '봉인된 교환')}</b><small>${escapeHtml(MODE_LABELS[item.mode] || item.mode)} · ${escapeHtml(formatDate(item.createdAt))}</small></div>
         </button>`;
     }).join('');
     return `<div class="ss-drawer-layout"><aside>${items}</aside><section class="ss-saved-preview">
-        ${selected ? `${exchangeResultHtml(selected)}<div class="ss-result-actions"><button class="ss-primary" data-action="start-saved" data-id="${escapeHtml(selected.id)}">이 카드로 장면 시작</button><button class="ss-danger" data-action="delete-saved" data-id="${escapeHtml(selected.id)}">기록 삭제</button></div>` : '<div class="ss-result-empty">왼쪽에서 편지를 골라줘.</div>'}
+        ${selected ? `${exchangeResultHtml(selected)}<div class="ss-result-actions">${selected.mode === 'random' && !selected.revealed ? `<button class="ss-secondary" data-action="reveal-saved-random" data-id="${escapeHtml(selected.id)}">봉투 열기</button>` : ''}<button class="ss-primary" data-action="start-saved" data-id="${escapeHtml(selected.id)}">이 카드로 장면 시작</button><button class="ss-danger" data-action="delete-saved" data-id="${escapeHtml(selected.id)}">기록 삭제</button></div>` : '<div class="ss-result-empty">왼쪽에서 편지를 골라줘.</div>'}
     </section></div>`;
 }
 
@@ -952,11 +1249,21 @@ function pinModalToViewport() {
 }
 
 function scheduleModalPin() {
-    pinModalToViewport();
     if (typeof globalThis.requestAnimationFrame === 'function') {
-        globalThis.requestAnimationFrame(() => pinModalToViewport());
+        if (modalPinFrame === null) {
+            modalPinFrame = globalThis.requestAnimationFrame(() => {
+                modalPinFrame = null;
+                pinModalToViewport();
+            });
+        }
+    } else {
+        pinModalToViewport();
     }
-    setTimeout(() => pinModalToViewport(), 120);
+    clearTimeout(modalPinTimer);
+    modalPinTimer = setTimeout(() => {
+        modalPinTimer = null;
+        pinModalToViewport();
+    }, 120);
 }
 
 function installModalViewportGuard() {
@@ -1016,6 +1323,12 @@ async function handleClick(event) {
     if (state.busy) return;
     if (action === 'seal-user' || action === 'regenerate-character') return generateCharacterCard();
     if (action === 'exchange') return exchangeCards();
+    if (action === 'reveal-random') return revealRandomEnvelope();
+    if (action === 'reroll-random') return generateRandomEnvelope();
+    if (action === 'burn-random') {
+        if (!confirm('이 랜덤 봉투를 태울까?')) return;
+        return burnRandomEnvelope(true);
+    }
     if (action === 'start') return startScene();
     if (action === 'save') return saveExchange();
     if (action === 'burn') {
@@ -1030,6 +1343,7 @@ async function handleClick(event) {
         if (!confirm('이 보관 기록을 삭제할까? 되돌릴 수 없어.')) return;
         return deleteSaved(button.dataset.id);
     }
+    if (action === 'reveal-saved-random') return revealSavedRandom(button.dataset.id);
     if (action === 'start-saved') {
         const list = dataCache?.saved?.[currentScope().key] || [];
         state.exchange = list.find(item => item.id === button.dataset.id) || null;
@@ -1048,8 +1362,7 @@ function handleChange(event) {
     }
 
     if (event.target.id === 'ss-mode') {
-        const candidate = readUserForm();
-        if (cardHasContent(candidate)) state.userCard = candidate;
+        captureUserFormIfVisible();
         state.mode = event.target.value;
         state.exchange = null;
         persistDraft();
@@ -1086,7 +1399,10 @@ function installGlobalHandlers() {
     });
     document.addEventListener('input', event => {
         if (!event.target.closest('#sweet-swap-overlay')) return;
-        if (DRAFT_FIELD_IDS.includes(event.target.id)) scheduleDraftSave();
+        if (DRAFT_FIELD_IDS.includes(event.target.id)) {
+            invalidateExchangeAfterUserEdit();
+            scheduleDraftSave();
+        }
     });
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape' && document.getElementById('sweet-swap-overlay')) closeModal();
