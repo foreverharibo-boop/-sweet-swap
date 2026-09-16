@@ -362,6 +362,28 @@ function plainMessageText(value) {
     return holder.textContent || holder.innerText || '';
 }
 
+function recentSceneContext(limit = 8, anonymizeSpeakers = false) {
+    const ctx = context();
+    if (!ctx) return 'No recent roleplay scene is available.';
+
+    const character = ctx.characters?.[ctx.characterId];
+    const recentChat = (ctx.chat || [])
+        .filter(message => !message?.is_system && !message?.is_hidden && !message?.extra?.hidden && !message?.extra?.isSmallSys)
+        .slice(-limit)
+        .map(message => {
+            const content = clipText(plainMessageText(message?.mes ?? message?.text ?? message?.content), 1200);
+            if (!content) return '';
+            const speaker = anonymizeSpeakers
+                ? (message?.is_user ? 'USER' : 'OTHER PARTICIPANT')
+                : (message?.is_user
+                    ? (ctx.name1 || 'User')
+                    : (message?.name || character?.name || ctx.name2 || 'Character'));
+            return `${speaker}: ${content}`;
+        }).filter(Boolean).join('\n\n');
+
+    return recentChat || 'No messages yet.';
+}
+
 function currentRoleplayContext() {
     const ctx = context();
     if (!ctx) return 'No roleplay context is available.';
@@ -385,21 +407,11 @@ function currentRoleplayContext() {
         profile.unshift(`Group: ${group?.name || currentScope().name}${members.length ? `\nMembers: ${members.join(', ')}` : ''}`);
     }
 
-    const recentChat = (ctx.chat || [])
-        .filter(message => !message?.is_system && !message?.is_hidden && !message?.extra?.hidden && !message?.extra?.isSmallSys)
-        .slice(-8)
-        .map(message => {
-            const content = clipText(plainMessageText(message?.mes ?? message?.text ?? message?.content), 1200);
-            if (!content) return '';
-            const speaker = message?.is_user
-                ? (ctx.name1 || 'User')
-                : (message?.name || character?.name || ctx.name2 || 'Character');
-            return `${speaker}: ${content}`;
-        }).filter(Boolean).join('\n\n');
+    const recentChat = recentSceneContext(8);
 
     return [
         profile.length ? `CHARACTER / GROUP\n${profile.join('\n\n')}` : '',
-        recentChat ? `RECENT CHAT (oldest to newest)\n${recentChat}` : 'RECENT CHAT\nNo messages yet.',
+        `RECENT CHAT (oldest to newest)\n${recentChat}`,
     ].filter(Boolean).join('\n\n');
 }
 
@@ -561,6 +573,11 @@ function characterCardPrompt(userCard) {
 
 All participants in this feature must be fictional adults. Respect mutual consent and the known user boundaries below. Infer the character's private NSFW wish from their established personality, relationship, and recent chat history. Keep the character recognizably in-character; do not flatten them into a generic voice. The central premise MUST be explicitly adult and sexual. Do not downgrade it to flirting, dating, cuddling, kissing, vague tension, or a merely romantic scenario. Keep it as a compact scenario card rather than a completed scene.
 
+CURRENT-SCENE CONTINUITY IS MANDATORY
+Treat the most recent chat as the authoritative present moment. Static character-sheet Description and Scenario are background information only and MUST NOT replace, reset, or relocate the current scene. Build a wish that can emerge naturally from the characters' ongoing action, current relationship, mood, physical state, and established location.
+
+The card's location must remain the current established location or an immediately adjacent part of it that requires no meaningful travel. Do not import a home, apartment, workplace, city, country, or other named setting from the character sheet unless the recent chat explicitly establishes that the characters are there now. Do not use a distant relocation, trip, major time skip, fantasy transport, or abrupt scene reset. If the exact location is unclear, write a neutral continuation such as "현재 머무는 방" rather than inventing a specific place. If an intimate scene is already underway, create a related next desire or variation that continues that scene instead of proposing an unrelated new encounter elsewhere.
+
 LANGUAGE REQUIREMENT
 Write every JSON field value in natural Korean, including the title and the character's note. Preserve proper names in their original spelling when appropriate. The JSON keys must remain exactly as specified in English.
 
@@ -615,22 +632,28 @@ Return JSON only, with exactly these string fields:
 
 function randomEnvelopePrompt(exclude = '') {
     const recentBlock = recentRandomEnvelopesBlock();
-    return `Create one completely random, unmistakably NSFW sealed scenario envelope for a fictional roleplay involving consenting adults.
+    const sceneBlock = recentSceneContext(8, true);
+    return `Create one context-light but scene-continuous, unmistakably NSFW sealed scenario envelope for a fictional roleplay involving consenting adults.
 
-You are deliberately given NO character sheet, NO character name, NO persona, NO relationship information, NO chat history, and NO current scene. Do not assume or invent identifying character details. Create a surprising standalone scenario that can later be adapted in-character by a different model.
+You are deliberately given NO character sheet, NO persona, and NO static relationship profile. You receive only an anonymized excerpt of the current scene so the envelope can remain physically and narratively plausible. Do not use or invent identifying character details, backstory, personality traits, addresses, or named locations that are not established in the excerpt.
 
-Be genuinely unpredictable about the central situation, location, atmosphere, and dynamic. The central premise MUST be explicitly adult and sexual. Do not produce flirting, dating, cuddling, kissing, vague tension, or a merely romantic scenario. Keep it as a compact scenario card, not a completed scene. Do not mention an AI, prompt, Sweet Swap, or the lack of context.
+Randomize the adult situation, dynamic, atmosphere, role reversal, or memorable twist — NOT the broad setting. The envelope must continue in the current established location or an immediately adjacent part of it that requires no meaningful travel. Do not relocate the scene to a different home, city, country, vehicle, remote facility, underwater setting, outer space, fantasy realm, historical era, or similarly unrelated place unless that setting is already established in the excerpt. Do not use a major time skip or abrupt scene reset. If the exact location is unclear, use a neutral phrase such as "현재 장소" or "현재 머무는 방" instead of inventing a specific place.
+
+Be surprising while remaining realistic within the current scene. The central premise MUST be explicitly adult and sexual. Do not produce flirting, dating, cuddling, kissing, vague tension, or a merely romantic scenario. Keep it as a compact scenario card, not a completed scene. Do not mention an AI, prompt, Sweet Swap, or the limited context.
 
 Write every JSON field value in natural Korean. Proper names, if unavoidable, may remain in their original spelling. Keep the JSON keys exactly as specified in English.
 
 MANDATORY USER BOUNDARIES
 ${exclude || 'No additional boundary was entered.'}
+
+ANONYMIZED CURRENT SCENE (oldest to newest; authoritative for continuity and location)
+${sceneBlock}
 ${recentBlock ? `\n${recentBlock}\n` : ''}
 Return JSON only, with exactly these string fields:
 {
   "title": "short mysterious title",
-  "situation": "a completely random standalone scenario",
-  "location": "a specific unexpected location",
+  "situation": "a surprising adult continuation that fits the current scene",
+  "location": "the current established location or an immediately adjacent part of it",
   "mood": "the atmosphere",
   "desiredRole": "a flexible dynamic that does not assume character identity",
   "mustInclude": "one memorable random twist",
@@ -1112,8 +1135,8 @@ function randomSwapTabHtml(modes) {
     const exchange = state.exchange?.mode === 'random' ? state.exchange : null;
     return `<div class="ss-swap-grid">
         <section class="ss-paper ss-user-paper">
-            <div class="ss-section-title"><span>🎲</span><div><b>완전 랜덤 봉투</b><small>캐릭터 시트·이름·관계·최근 채팅을 하나도 읽지 않아요.</small></div></div>
-            <div class="ss-info-box">AI에게는 모든 등장인물이 성인이라는 조건과 아래 제외 요소, 최근 랜덤 봉투 3장만 전달돼요. 실제 장면을 시작할 때는 메인 AI가 현재 캐릭터답게 이어갑니다.</div>
+            <div class="ss-section-title"><span>🎲</span><div><b>완전 랜덤 봉투</b><small>캐릭터 시트 없이 최근 장면만 보고 내용은 무작위로 만들어요.</small></div></div>
+            <div class="ss-info-box">AI는 캐릭터 시트·페르소나를 읽지 않고 최근 장면 8개에서 현재 상황과 장소만 참고해요. 아래 제외 요소를 지키며, 현재 장소 안에서 내용만 랜덤으로 만들고 최근 랜덤 봉투 3장과의 반복을 피합니다.</div>
             <label>랜덤 봉투에서도 제외할 요소<textarea id="ss-random-exclude" rows="4" placeholder="절대 나오면 안 되는 요소를 적어줘">${escapeHtml(state.randomExclude || '')}</textarea></label>
         </section>
 
