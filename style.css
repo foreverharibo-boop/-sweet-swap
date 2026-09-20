@@ -758,3 +758,25 @@
     .ss-spinner { animation-duration: 1.5s; }
     .ss-switch-row i::after { transition: none; }
 }
+
+/* 알림(toastr)이 sweet swap 창 뒤로 가려지지 않도록 항상 최상단에 표시 */
+#toast-container {
+    z-index: 2147483000 !important;
+}
+
+.ss-turns-box {
+    display: grid;
+    gap: 4px;
+    padding: 12px 4px 4px;
+}
+
+.ss-turns-head {
+    display: grid;
+    gap: 4px;
+    padding: 0 4px 6px;
+}
+
+.ss-turns-head small {
+    color: var(--ss-muted, #9a7f88);
+    line-height: 1.45;
+}

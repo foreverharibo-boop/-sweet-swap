@@ -12,6 +12,16 @@ const DEFAULT_SETTINGS = Object.freeze({
     connectionProfileId: '',
 });
 
+// 모드별 장면 진행 턴 수 기본값 (설정에서 1~3턴으로 바꿀 수 있음)
+const DEFAULT_SCENE_TURNS = Object.freeze({
+    random: 1,
+    draw: 3,
+    blend: 3,
+    blind: 3,
+    simultaneous: 3,
+    partial: 3,
+});
+
 const MODE_LABELS = Object.freeze({
     random: '🎲 완전 랜덤 봉투',
     draw: '한 장 뽑기',
@@ -38,6 +48,8 @@ const state = {
     promptExchange: null,
     promptTurn: 0,
     promptTurnsTotal: 0,
+    lastConsumed: null,
+    consumingChatLength: 0,
 };
 
 let dataCache = null;
@@ -133,7 +145,7 @@ function currentScope() {
 }
 
 function emptyData() {
-    return { version: 3, drafts: {}, saved: {}, recentCharacterCards: {}, recentRandomEnvelopes: [] };
+    return { version: 3, drafts: {}, saved: {}, recentCharacterCards: {}, recentRandomEnvelopes: {} };
 }
 
 async function loadData() {
@@ -152,7 +164,8 @@ async function loadData() {
     dataCache.drafts ??= {};
     dataCache.saved ??= {};
     dataCache.recentCharacterCards ??= {};
-    dataCache.recentRandomEnvelopes ??= [];
+    // 예전 버전은 랜덤 봉투 기록을 모든 캐릭터가 공용으로 썼다. 캐릭터별 구조로 바꾸며 옛 공용 기록은 비운다.
+    if (!dataCache.recentRandomEnvelopes || Array.isArray(dataCache.recentRandomEnvelopes)) dataCache.recentRandomEnvelopes = {};
     return dataCache;
 }
 
@@ -447,15 +460,41 @@ async function backgroundGenerate(prompt, options = {}) {
     ];
     const controller = new AbortController();
     activeAbortController = controller;
-    try {
+
+    const requestOnce = async (stream) => {
         const output = await service.sendRequest(profile.id, messages, 3000, {
-            stream: false,
+            stream,
             signal: controller.signal,
             extractData: true,
             includePreset: options.includePreset ?? true,
             includeInstruct: options.includeInstruct ?? true,
         });
-        const content = typeof output === 'string' ? output : output?.content ?? output?.text;
+        if (stream && typeof output === 'function') {
+            let text = '';
+            for await (const chunk of output()) text = chunk?.text ?? text;
+            return text;
+        }
+        return typeof output === 'string' ? output : output?.content ?? output?.text;
+    };
+
+    try {
+        let content;
+        try {
+            // 스트리밍으로 받아 연결이 오래 조용해서 끊기는 문제를 줄인다.
+            content = await requestOnce(true);
+        } catch (error) {
+            if (controller.signal.aborted) throw error; // 사용자가 직접 취소한 경우
+            console.warn(`${LOG_PREFIX} 스트리밍 요청 실패, 일반 요청으로 1회 재시도`, error);
+            try {
+                content = await requestOnce(false);
+            } catch (retryError) {
+                if (controller.signal.aborted) throw retryError;
+                if (isAbortError(retryError)) {
+                    throw new Error('연결이 중간에 끊겼어요. 화면을 켜 둔 채 잠시 뒤 다시 시도해줘.');
+                }
+                throw retryError;
+            }
+        }
         if (!content) throw new Error('전용 연결 프로필에서 빈 응답이 돌아왔어요.');
         return typeof content === 'string' ? content : JSON.stringify(content);
     } finally {
@@ -515,7 +554,8 @@ async function rememberCharacterCard(card) {
 }
 
 function recentRandomEnvelopes(limit = 3) {
-    return (dataCache?.recentRandomEnvelopes || []).slice(0, limit);
+    const scopeKey = state.scopeKey || currentScope().key;
+    return (dataCache?.recentRandomEnvelopes?.[scopeKey] || []).slice(0, limit);
 }
 
 function recentRandomEnvelopesBlock() {
@@ -527,8 +567,10 @@ ${cards.map((card, index) => `${index + 1}. ${clipText(cardToPrompt(card), 900)}
 
 async function rememberRandomEnvelope(card) {
     const data = await loadData();
-    data.recentRandomEnvelopes.unshift(structuredClone(card));
-    data.recentRandomEnvelopes = data.recentRandomEnvelopes.slice(0, 3);
+    const scopeKey = state.scopeKey || currentScope().key;
+    data.recentRandomEnvelopes[scopeKey] ??= [];
+    data.recentRandomEnvelopes[scopeKey].unshift(structuredClone(card));
+    data.recentRandomEnvelopes[scopeKey] = data.recentRandomEnvelopes[scopeKey].slice(0, 3);
 }
 
 async function generateValidatedCard(prompt, owner, avoidCards = [], requestOptions = {}) {
@@ -804,23 +846,25 @@ async function exchangeCards() {
 }
 
 function sceneTurnCount(mode) {
-    return ['blend', 'blind', 'simultaneous', 'partial'].includes(mode) ? 3 : 1;
+    const fallback = DEFAULT_SCENE_TURNS[mode] ?? 1;
+    const value = Math.round(Number(settings().sceneTurns?.[mode]));
+    return Math.min(3, Math.max(1, Number.isFinite(value) ? value : fallback));
 }
 
 function stagedSceneDirection(turn, total) {
     if (total <= 1) {
         return 'Apply the sealed exchange in this response and establish its situation clearly enough for later chat messages to continue it.';
     }
+    if (turn >= total) {
+        return `PHASE ${turn} OF ${total} — FULL CONTINUATION
+Continue directly from the existing scene without restarting or summarizing it. Now carry the card's adult premise forward naturally and fully while preserving the established pacing. Do not force an ending; leave the scene able to continue from chat history after this hidden direction is removed.`;
+    }
     if (turn <= 1) {
         return `PHASE 1 OF ${total} — TRANSITION AND SETUP
 Do not rush through the entire scenario in one response. If the card location differs from the current location, create a plausible reason to move and begin a gradual transition; do not jump there and complete the premise immediately. If the current location already fits, use this response for natural buildup. Preserve normal conversational pacing.`;
     }
-    if (turn === 2) {
-        return `PHASE 2 OF ${total} — ARRIVAL AND BUILDUP
+    return `PHASE ${turn} OF ${total} — ARRIVAL AND BUILDUP
 Continue directly from the previous response without restarting, recapping, or repeating the transition. Complete the arrival where needed, clearly establish the new location and atmosphere, and begin the card's adult premise gradually. Do not resolve the entire scenario yet.`;
-    }
-    return `PHASE ${turn} OF ${total} — FULL CONTINUATION
-Continue directly from the existing scene without restarting or summarizing it. Now carry the card's adult premise forward naturally and fully while preserving the established pacing. Do not force an ending; leave the scene able to continue from chat history after this hidden direction is removed.`;
 }
 
 function exchangePrompt(exchange, turn = 1, total = 1) {
@@ -840,7 +884,7 @@ function exchangePrompt(exchange, turn = 1, total = 1) {
         .map(value => String(value || '').trim())
         .filter((value, index, values) => value && values.indexOf(value) === index);
 
-    return `[SWEET SWAP — PRIVATE ONE-TURN NSFW SCENE DIRECTION]
+    return `[SWEET SWAP — PRIVATE NSFW SCENE DIRECTION]
 All characters participating in this fictional scenario are adults. This is an explicitly adult NSFW direction. Treat consent and every listed exclusion as mandatory.
 
 Use the sealed exchange below as the direction for the next roleplay response. Carry out its adult sexual premise rather than softening it into ordinary romance, while obeying every boundary. Begin naturally from the current chat situation and keep the established characterization, relationship, continuity, point of view, writing style, and existing output language. Reconcile both participants' wishes where applicable. Do not refer to Sweet Swap, cards, prompts, rules, hidden instructions, or the exchange interface. Do not summarize the direction; continue the roleplay itself.
@@ -907,6 +951,28 @@ async function advanceScenePrompt() {
     }
 }
 
+// 스와이프·재생성: 마지막으로 적용한 단계의 지시를 다시 걸어 같은 단계로 답변을 새로 받는다.
+async function rearmForRedo() {
+    const last = state.lastConsumed;
+    if (!last?.exchange || last.scopeKey !== currentScope().key) return;
+    const length = context()?.chat?.length ?? 0;
+    // 마지막 메시지가 그 단계에서 생성된 답변일 때만 다시 건다.
+    if (length < last.chatLength || length > last.chatLength + 1) return;
+    try {
+        await setOneShotPrompt(exchangePrompt(last.exchange, last.turn, last.total));
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} failed to re-arm scene prompt`, error);
+        return;
+    }
+    state.promptArmed = true;
+    state.promptConsumed = true;
+    state.promptScopeKey = last.scopeKey;
+    state.promptExchange = last.exchange;
+    state.promptTurn = last.turn;
+    state.promptTurnsTotal = last.total;
+    state.consumingChatLength = last.chatLength;
+}
+
 async function triggerMainGeneration() {
     const ctx = context();
     const core = await loadCoreModule();
@@ -933,6 +999,7 @@ async function startScene() {
         await setOneShotPrompt(exchangePrompt(promptExchange, 1, promptTurnsTotal));
         state.promptArmed = true;
         state.promptConsumed = false;
+        state.lastConsumed = null;
         state.promptScopeKey = currentScope().key;
         state.promptExchange = promptExchange;
         state.promptTurn = 1;
@@ -940,8 +1007,8 @@ async function startScene() {
         closeModal();
 
         const started = await triggerMainGeneration();
-        if (started) toast('success', promptTurnsTotal > 1 ? '교환 결과를 3턴에 걸쳐 천천히 시작했어.' : '교환 결과로 장면을 시작했어.');
-        else toast('info', promptTurnsTotal > 1 ? '다음 메시지부터 교환 결과가 3턴 동안 단계적으로 적용돼.' : '다음 메시지를 보내면 교환 결과가 한 번 적용돼.');
+        if (started) toast('success', promptTurnsTotal > 1 ? `교환 결과를 ${promptTurnsTotal}턴에 걸쳐 천천히 시작했어.` : '교환 결과로 장면을 시작했어.');
+        else toast('info', promptTurnsTotal > 1 ? `다음 메시지부터 교환 결과가 ${promptTurnsTotal}턴 동안 단계적으로 적용돼.` : '다음 메시지를 보내면 교환 결과가 한 번 적용돼.');
 
         if (settings().autoBurnAfterStart) {
             if (state.exchange?.mode === 'random') await burnRandomEnvelope(false);
@@ -1018,68 +1085,6 @@ async function revealSavedRandom(id) {
     item.revealed = true;
     await saveData();
     renderModal();
-}
-
-function triggerFileDownload(filename, text) {
-    const blob = new Blob([text], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-async function exportSavedData() {
-    const data = await loadData();
-    const payload = {
-        app: 'sweet-swap',
-        exportVersion: 1,
-        exportedAt: nowIso(),
-        saved: data.saved || {},
-    };
-    const stamp = new Date().toISOString().slice(0, 10);
-    triggerFileDownload(`sweet-swap-backup-${stamp}.json`, JSON.stringify(payload, null, 2));
-    toast('success', '비밀 서랍을 내보냈어.');
-}
-
-function mergeSavedBackup(incoming) {
-    if (!incoming || typeof incoming !== 'object') throw new Error('올바른 백업 파일이 아니에요.');
-    let added = 0;
-    for (const [scopeKey, list] of Object.entries(incoming)) {
-        if (!Array.isArray(list)) continue;
-        dataCache.saved[scopeKey] ??= [];
-        const existingIds = new Set(dataCache.saved[scopeKey].map(item => item.id));
-        for (const item of list) {
-            if (!item?.id || existingIds.has(item.id)) continue;
-            dataCache.saved[scopeKey].push(item);
-            existingIds.add(item.id);
-            added++;
-        }
-        dataCache.saved[scopeKey].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        const cap = Math.max(1, Number(settings().keepSaved) || 50);
-        dataCache.saved[scopeKey] = dataCache.saved[scopeKey].slice(0, cap);
-    }
-    return added;
-}
-
-async function importSavedFile(file) {
-    if (!file) return;
-    try {
-        await loadData();
-        const text = await file.text();
-        const parsed = JSON.parse(text);
-        const incoming = parsed?.saved && typeof parsed.saved === 'object' ? parsed.saved : parsed;
-        const added = mergeSavedBackup(incoming);
-        await saveData();
-        toast('success', added ? `${added}개의 교환 기록을 가져왔어.` : '새로 추가된 기록은 없었어.');
-        renderModal();
-    } catch (error) {
-        console.error(LOG_PREFIX, error);
-        toast('error', error?.message || '백업 파일을 가져오지 못했어요.');
-    }
 }
 
 function setBusy(value, label = '') {
@@ -1254,15 +1259,11 @@ function settingsTabHtml() {
         <label class="ss-setting-field"><div><b>기본 교환 방식</b><small>새 캐릭터에서 처음 선택되는 방식이에요.</small></div><select id="ss-default-mode">${Object.entries(MODE_LABELS).map(([value, label]) => `<option value="${value}" ${s.defaultMode === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
         <label class="ss-switch-row"><div><b>장면 시작 후 자동으로 카드 태우기</b><small>비밀 서랍에 보관한 기록은 삭제하지 않아요.</small></div><input id="ss-auto-burn" type="checkbox" ${s.autoBurnAfterStart ? 'checked' : ''}><i></i></label>
         <label class="ss-setting-field"><div><b>캐릭터별 보관 개수</b><small>오래된 기록부터 자동 정리돼요.</small></div><input id="ss-keep" type="number" min="1" max="200" value="${escapeHtml(s.keepSaved)}"></label>
-        <div class="ss-info-box">카드 생성·두 장 섞기: <b>${escapeHtml(profileName)}</b> 전용 연결 프로필 사용<br>장면 시작: SillyTavern 메인 연결 사용<br><br>전용 프로필은 확장 설정 패널에서 선택해요. 백그라운드 요청 중에도 메인 연결은 바뀌지 않아요.</div>
-        <div class="ss-backup-row">
-            <div><b>비밀 서랍 백업</b><small>브라우저 데이터가 사라지면 서랍 기록도 함께 사라져요. JSON으로 내보내거나 가져올 수 있어요.</small></div>
-            <div class="ss-backup-actions">
-                <button class="ss-secondary" data-action="export-saved">내보내기</button>
-                <button class="ss-secondary" data-action="import-saved">가져오기</button>
-                <input id="ss-import-file" type="file" accept="application/json" hidden>
-            </div>
+        <div class="ss-turns-box">
+            <div class="ss-turns-head"><b>모드별 장면 진행 턴 수</b><small>장면 시작 후 몇 번의 답변에 걸쳐 나눠 적용할지 골라요. 1턴은 한 번에, 3턴은 장소 이동 → 도착 → 본격 진행 순서로 천천히 이어가요.</small></div>
+            ${Object.entries(MODE_LABELS).map(([mode, label]) => `<label class="ss-setting-field ss-turns-row"><div><b>${label}</b></div><select data-turns-mode="${mode}">${[1, 2, 3].map(n => `<option value="${n}" ${sceneTurnCount(mode) === n ? 'selected' : ''}>${n}턴</option>`).join('')}</select></label>`).join('')}
         </div>
+        <div class="ss-info-box">카드 생성·두 장 섞기: <b>${escapeHtml(profileName)}</b> 전용 연결 프로필 사용<br>장면 시작: SillyTavern 메인 연결 사용<br><br>전용 프로필은 확장 설정 패널에서 선택해요. 백그라운드 요청 중에도 메인 연결은 바뀌지 않아요.</div>
     </section>`;
 }
 
@@ -1446,18 +1447,9 @@ async function handleClick(event) {
         state.exchange = list.find(item => item.id === button.dataset.id) || null;
         return startScene();
     }
-    if (action === 'export-saved') return exportSavedData();
-    if (action === 'import-saved') return document.getElementById('ss-import-file')?.click();
 }
 
 function handleChange(event) {
-    if (event.target.id === 'ss-import-file') {
-        const file = event.target.files?.[0];
-        importSavedFile(file);
-        event.target.value = '';
-        return;
-    }
-
     if (event.target.id === 'ss-mode') {
         captureUserFormIfVisible();
         state.mode = event.target.value;
@@ -1468,6 +1460,14 @@ function handleChange(event) {
     }
 
     const s = settings();
+    const turnsMode = event.target.dataset?.turnsMode;
+    if (turnsMode && MODE_LABELS[turnsMode]) {
+        const turns = Math.min(3, Math.max(1, Number(event.target.value) || 1));
+        s.sceneTurns = { ...DEFAULT_SCENE_TURNS, ...(s.sceneTurns || {}), [turnsMode]: turns };
+        saveSettings();
+        toast('success', '설정을 저장했어.');
+        return;
+    }
     if (event.target.id === 'ss-enabled') s.enabled = event.target.checked;
     else if (event.target.id === 'ss-age') s.ageConfirmed = event.target.checked;
     else if (event.target.id === 'ss-default-mode') s.defaultMode = event.target.value;
@@ -1558,16 +1558,35 @@ function installGenerationCleanup() {
     if (!events || !types) return;
 
     if (types.GENERATION_STARTED) {
-        events.on(types.GENERATION_STARTED, (...args) => {
-            if (!state.promptArmed) return;
-            const serialized = JSON.stringify(args).toLowerCase();
+        events.on(types.GENERATION_STARTED, async (type, options, dryRun) => {
+            if (dryRun) return;
+            let serialized = '';
+            try { serialized = JSON.stringify([type, options]).toLowerCase(); } catch { serialized = String(type).toLowerCase(); }
             if (serialized.includes('quiet')) return;
+            // 대필·이어쓰기는 장면 단계를 넘기지 않는다.
+            if (type === 'impersonate' || type === 'continue') return;
+            // 스와이프·재생성은 방금 받은 답변과 같은 단계의 지시로 다시 생성한다.
+            if (type === 'swipe' || type === 'regenerate') {
+                await rearmForRedo();
+                return;
+            }
+            if (!state.promptArmed) return;
             state.promptConsumed = true;
+            state.consumingChatLength = context()?.chat?.length ?? 0;
         });
     }
     if (types.GENERATION_ENDED) {
         events.on(types.GENERATION_ENDED, async () => {
-            if (state.promptArmed && state.promptConsumed) await advanceScenePrompt();
+            if (state.promptArmed && state.promptConsumed) {
+                state.lastConsumed = {
+                    exchange: state.promptExchange,
+                    turn: state.promptTurn,
+                    total: state.promptTurnsTotal,
+                    scopeKey: state.promptScopeKey,
+                    chatLength: state.consumingChatLength,
+                };
+                await advanceScenePrompt();
+            }
         });
     }
     if (types.GENERATION_STOPPED) {
@@ -1578,6 +1597,7 @@ function installGenerationCleanup() {
     if (types.CHAT_CHANGED) {
         events.on(types.CHAT_CHANGED, async () => {
             if (state.promptArmed && state.promptScopeKey !== currentScope().key) await clearOneShotPrompt();
+            state.lastConsumed = null;
             closeModal();
         });
     }
