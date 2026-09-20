@@ -853,7 +853,8 @@ function sceneTurnCount(mode) {
 
 function stagedSceneDirection(turn, total) {
     if (total <= 1) {
-        return 'Apply the sealed exchange in this response and establish its situation clearly enough for later chat messages to continue it.';
+        return `SINGLE-RESPONSE OPENING — PACE CAREFULLY
+Begin the sealed exchange in this response and establish its situation clearly, but do NOT compress the whole arc (setup, development, and conclusion) into one reply. Cover only the opening beat and the first stretch of the premise, at the same length and pacing as a normal response in this chat. Do not reach a climax, resolution, or ending. Stop at a natural point where the scene is still unfolding, so later chat messages can continue and develop it.`;
     }
     if (turn >= total) {
         return `PHASE ${turn} OF ${total} — FULL CONTINUATION
@@ -887,7 +888,7 @@ function exchangePrompt(exchange, turn = 1, total = 1) {
     return `[SWEET SWAP — PRIVATE NSFW SCENE DIRECTION]
 All characters participating in this fictional scenario are adults. This is an explicitly adult NSFW direction. Treat consent and every listed exclusion as mandatory.
 
-Use the sealed exchange below as the direction for the next roleplay response. Carry out its adult sexual premise rather than softening it into ordinary romance, while obeying every boundary. Begin naturally from the current chat situation and keep the established characterization, relationship, continuity, point of view, writing style, and existing output language. Reconcile both participants' wishes where applicable. Do not refer to Sweet Swap, cards, prompts, rules, hidden instructions, or the exchange interface. Do not summarize the direction; continue the roleplay itself.
+Use the sealed exchange below as the direction for the next roleplay response. Steer the response toward its adult sexual premise rather than softening it into ordinary romance, while obeying every boundary. Begin naturally from the current chat situation and keep the established characterization, relationship, continuity, point of view, writing style, and existing output language. Reconcile both participants' wishes where applicable. Do not refer to Sweet Swap, cards, prompts, rules, hidden instructions, or the exchange interface. Do not summarize the direction; continue the roleplay itself.
 
 CURRENT PACING PHASE
 ${stagedSceneDirection(turn, total)}
