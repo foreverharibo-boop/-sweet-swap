@@ -895,6 +895,11 @@ function exchangePrompt(exchange, turn = 1, total = 1) {
     else if (exchange.mode === 'blend') selected = cardToPrompt(exchange.combinedCard);
     else if (exchange.mode === 'draw') selected = cardToPrompt(exchange.chosen === 'character' ? exchange.characterCard : exchange.userCard);
     else selected = `USER CARD\n${cardToPrompt(exchange.userCard)}\n\nCHARACTER CARD\n${cardToPrompt(exchange.characterCard)}`;
+    const hasTwoCards = !['random', 'blend', 'draw'].includes(exchange.mode);
+    const conflictRule = hasTwoCards ? `
+
+WHEN THE TWO CARDS CONFLICT
+If the two cards contradict each other (different locations, opposite moods, or competing roles or who takes the lead), do not erase either card and do not flatten them into a bland compromise. Let both wishes actually happen within the scene: fulfil them one after the other in a natural order, or find a plausible way to combine them, while keeping each participant in character. Across multiple phases, spread them out instead of forcing everything at once. The mandatory boundaries below always override any wish from either card.` : '';
 
     const mandatoryBoundaries = [
         exchange.randomExclude,
@@ -914,7 +919,7 @@ CURRENT PACING PHASE
 ${stagedSceneDirection(turn, total)}
 
 SEALED EXCHANGE
-${selected}
+${selected}${conflictRule}
 
 MANDATORY BOUNDARIES FROM BOTH PARTICIPANTS
 ${mandatoryBoundaries.length ? mandatoryBoundaries.map(value => `- ${value}`).join('\n') : '- No additional boundaries were entered.'}
