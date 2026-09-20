@@ -17,14 +17,7 @@
 
 ---
 
-## 설치하기
-
-1. `sweet-swap` 같은 이름으로 폴더를 하나 만들고, 파일 4개(`index.js`, `manifest.json`, `style.css`, `README.md`)를 그 안에 넣어요.
-2. 그 폴더를 통째로 아래 위치에 넣어요.
-   `SillyTavern/data/default-user/extensions/`
-3. SillyTavern을 껐다가 다시 켜요.
-
-### 처음 한 번만 하는 설정
+## 처음 한 번만 하는 설정
 
 1. **연결 프로필 만들기**: SillyTavern의 연결 프로필(Connection Manager) 기능으로, 카드를 만들 때 쓸 AI 연결을 하나 만들어 둬요.
 2. **전용 연결 고르기**: 확장 탭에서 `💝 sweet swap`을 펼치고 `전용 연결`에서 방금 만든 프로필을 골라요.
@@ -111,6 +104,15 @@
 | 장면 시작 후 자동으로 카드 태우기 | 장면을 시작하면 카드를 자동으로 지워요. 비밀 서랍에 보관한 건 안 지워져요 |
 | 캐릭터별 보관 개수 | 비밀 서랍에 캐릭터마다 몇 개까지 둘지. 넘으면 **오래된 것부터** 지워져요 |
 | 모드별 장면 진행 턴 수 | 위에서 설명한 1~3턴 |
+
+---
+
+## 설치하기
+
+1. `sweet-swap` 같은 이름으로 폴더를 하나 만들고, 파일 4개(`index.js`, `manifest.json`, `style.css`, `README.md`)를 그 안에 넣어요.
+2. 그 폴더를 통째로 아래 위치에 넣어요.
+   `SillyTavern/data/default-user/extensions/`
+3. SillyTavern을 껐다가 다시 켜요.
 
 ---
 
