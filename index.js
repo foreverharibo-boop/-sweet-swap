@@ -88,6 +88,26 @@ function saveSettings() {
 }
 
 function toast(type, message) {
+    // sweet swap 창이 열려 있으면 창보다 위에 뜨는 자체 알림을 쓰고, 아니면 ST 기본 알림을 쓴다.
+    if (document.getElementById('sweet-swap-overlay')) {
+        let host = document.getElementById('sweet-swap-toast-host');
+        if (!host) {
+            host = document.createElement('div');
+            host.id = 'sweet-swap-toast-host';
+        }
+        // 창(overlay)보다 나중에 오도록 항상 맨 뒤로 옮겨 겹침 순서를 보장한다.
+        document.documentElement.appendChild(host);
+        const item = document.createElement('div');
+        item.className = `ss-toast is-${['success', 'warning', 'error'].includes(type) ? type : 'info'}`;
+        item.textContent = String(message ?? '');
+        host.appendChild(item);
+        while (host.children.length > 3) host.firstElementChild.remove();
+        setTimeout(() => {
+            item.remove();
+            if (!host.children.length) host.remove();
+        }, type === 'error' ? 4200 : 2400);
+        return;
+    }
     const target = globalThis.toastr?.[type];
     if (typeof target === 'function') target(message, '💝sweet swap');
     else console[type === 'error' ? 'error' : 'log'](`${LOG_PREFIX} ${message}`);
@@ -1159,7 +1179,7 @@ function randomSwapTabHtml(modes) {
         <section class="ss-paper ss-user-paper">
             <div class="ss-section-title"><span>🎲</span><div><b>완전 랜덤 봉투</b><small>캐릭터 시트 없이 최근 장면만 보고 내용은 무작위로 만들어요.</small></div></div>
             <div class="ss-info-box">AI는 캐릭터 시트·페르소나를 읽지 않고 최근 장면 8개에서 현재 상황과 장소만 참고해요. 아래 제외 요소를 지키며, 현재 장소 안에서 내용만 랜덤으로 만들고 최근 랜덤 봉투 3장과의 반복을 피합니다.</div>
-            <label>랜덤 봉투에서도 제외할 요소<textarea id="ss-random-exclude" rows="4" placeholder="절대 나오면 안 되는 요소를 적어줘">${escapeHtml(state.randomExclude || '')}</textarea></label>
+            <label>랜덤 봉투에서도 제외할 요소<textarea id="ss-random-exclude" rows="3" placeholder="절대 나오면 안 되는 요소를 적어줘">${escapeHtml(state.randomExclude || '')}</textarea></label>
         </section>
 
         <section class="ss-paper ss-character-paper">
@@ -1192,7 +1212,7 @@ function swapTabHtml() {
         <section class="ss-paper ss-user-paper">
             <div class="ss-section-title"><span>01</span><div><b>나의 카드</b><small>작성한 내용은 봉인 전까지 자유롭게 바꿀 수 있어.</small></div></div>
             <label>카드 제목<input id="ss-title" type="text" value="${escapeHtml(f.title || '')}" placeholder="예: 비 오는 밤의 초대"></label>
-            <label>원하는 상황<textarea id="ss-situation" rows="3" placeholder="어떤 상황을 원하는지 적어줘">${escapeHtml(f.situation || '')}</textarea></label>
+            <label>원하는 상황<textarea id="ss-situation" rows="2" placeholder="어떤 상황을 원하는지 적어줘">${escapeHtml(f.situation || '')}</textarea></label>
             <div class="ss-two-col">
                 <label>장소<input id="ss-location" type="text" value="${escapeHtml(f.location || '')}" placeholder="어디에서"></label>
                 <label>분위기<input id="ss-mood" type="text" value="${escapeHtml(f.mood || '')}" placeholder="달달함, 긴장감…"></label>
