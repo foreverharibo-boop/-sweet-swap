@@ -288,8 +288,23 @@ function safeJson(text) {
     } catch {
         const start = source.indexOf('{');
         const end = source.lastIndexOf('}');
-        if (start < 0 || end <= start) throw new Error('JSON 형식의 카드가 반환되지 않았어요.');
-        return JSON.parse(source.slice(start, end + 1));
+        if (start < 0 || end <= start) {
+            console.warn(`${LOG_PREFIX} AI 응답에 JSON 괄호가 없음 (원문):`, source);
+            throw new Error('JSON 형식의 카드가 반환되지 않았어요. (콘솔에서 원문 확인 가능)');
+        }
+        const sliced = source.slice(start, end + 1);
+        try {
+            return JSON.parse(sliced);
+        } catch (innerError) {
+            // 흔한 사소한 오류(트레일링 콤마)는 한 번 더 복구 시도
+            const repaired = sliced.replace(/,\s*([}\]])/g, '$1');
+            try {
+                return JSON.parse(repaired);
+            } catch {
+                console.warn(`${LOG_PREFIX} JSON 파싱 실패 (원문):`, sliced);
+                throw innerError;
+            }
+        }
     }
 }
 
@@ -533,6 +548,7 @@ async function generateValidatedCard(prompt, owner, avoidCards = [], requestOpti
             }
             return card;
         } catch (error) {
+            console.warn(`${LOG_PREFIX} 카드 생성 ${attempt + 1}번째 시도 실패: ${error?.message}`, response);
             lastError = error;
             if (attempt === 0) {
                 retryPrompt = `${prompt}\n\nRETRY REQUIRED: The previous response was empty, invalid, too similar, insufficiently NSFW, or not written in Korean. Return a valid JSON card with a clearly different adult sexual situation, location, and dynamic. All human-readable field values must be in natural Korean.\n\nPREVIOUS INVALID RESULT\n${clipText(card ? cardToPrompt(card) : response, 900)}`;
