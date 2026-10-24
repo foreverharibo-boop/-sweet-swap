@@ -1404,16 +1404,13 @@ async function openModal(tab = 'swap') {
         scheduleModalPin();
         return;
     }
-    if (!settings().enabled) {
-        toast('warning', '확장 설정에서 sweet swap을 먼저 켜줘.');
-        return;
-    }
-    if (currentScope().key === 'none') {
+    const enabled = settings().enabled;
+    if (enabled && currentScope().key === 'none') {
         toast('warning', '먼저 캐릭터 또는 그룹 채팅을 열어줘.');
         return;
     }
     await loadScopeState();
-    state.tab = settings().ageConfirmed ? tab : 'settings';
+    state.tab = enabled && settings().ageConfirmed ? tab : 'settings';
     const wrapper = document.createElement('div');
     wrapper.innerHTML = modalHtml();
     document.documentElement.appendChild(wrapper.firstElementChild);
@@ -1431,6 +1428,10 @@ function closeModal() {
 async function handleClick(event) {
     const tab = event.target.closest('[data-tab]')?.dataset.tab;
     if (tab) {
+        if (!settings().enabled && tab !== 'settings') {
+            toast('warning', '설정에서 sweet swap 사용을 먼저 켜줘.');
+            return;
+        }
         clearTimeout(draftSaveTimer);
         captureUserFormIfVisible();
         await persistDraft();
